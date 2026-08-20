@@ -1,0 +1,3 @@
+# Build artifacts: the dhake.com binaries are COMMITTED (bootstrap self-host
+# binaries, following the dhall-c precedent), so only scratch files are ignored.
+.cache/

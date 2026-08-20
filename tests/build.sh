@@ -198,6 +198,133 @@ ok=1
 grep -q "no rule to make target 'hello.c'" /tmp/dhake-err9.txt || { echo "  missing source error message not found"; ok=0; }
 check "missing-source-file" "$ok"
 
+# ---- Case 10: Parallel build with -j 2 ----
+# Create two independent targets with touch commands (no compilation needed)
+cat > build_parallel.dhall <<'BUILDEOF'
+let Action = < Shell : Text | Copy : { from : Text, to : Text } | Mkdir : Text | Rm : Text | Touch : Text | Move : { from : Text, to : Text } | Symlink : { from : Text, to : Text } | Chmod : { path : Text, mode : Text } | Echo : Text | Env : { key : Text, value : Text } | Run : { argv : List Text } >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { targets = [ { mapKey = "a", mapValue = { deps = [], phony = True, recipe = [ < Touch = "a.stamp" > ] } }, { mapKey = "b", mapValue = { deps = [], phony = True, recipe = [ < Touch = "b.stamp" > ] } } ], default = "a" }
+BUILDEOF
+
+"$BIN" -f build_parallel.dhall -j 2 a b > /tmp/dhake-out10.txt 2> /tmp/dhake-err10.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+grep -q "building 'a'" /tmp/dhake-out10.txt || { echo "  building a not found"; ok=0; }
+grep -q "building 'b'" /tmp/dhake-out10.txt || { echo "  building b not found"; ok=0; }
+[ -f ./a.stamp ] || { echo "  a.stamp not created"; ok=0; }
+[ -f ./b.stamp ] || { echo "  b.stamp not created"; ok=0; }
+check "parallel-build-j2" "$ok"
+
+# ---- Case 11: Parallel stop-on-first-failure ----
+# Create a failing target using Shell action with exit 42
+cat > build_fail_parallel.dhall <<'BUILDEOF'
+let Action = < Shell : Text | Copy : { from : Text, to : Text } | Mkdir : Text | Rm : Text | Touch : Text | Move : { from : Text, to : Text } | Symlink : { from : Text, to : Text } | Chmod : { path : Text, mode : Text } | Echo : Text | Env : { key : Text, value : Text } | Run : { argv : List Text } >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { targets = [ { mapKey = "fail", mapValue = { deps = [], phony = False, recipe = [ < Shell = "exit 42" > ] } }, { mapKey = "good", mapValue = { deps = [], phony = False, recipe = [ < Touch = "good.stamp" > ] } } ], default = "fail" }
+BUILDEOF
+
+"$BIN" -f build_fail_parallel.dhall -j 2 > /tmp/dhake-out11.txt 2> /tmp/dhake-err11.txt
+rc=$?
+ok=1
+[ "$rc" -eq 42 ] || { echo "  expected exit 42, got $rc"; ok=0; }
+check "parallel-stop-on-first-failure" "$ok"
+
+# ---- Case 12: Move action ----
+write_file move_src.txt "source content"
+cat > build_move.dhall <<'BUILDEOF'
+let Action = < Shell : Text | Copy : { from : Text, to : Text } | Mkdir : Text | Rm : Text | Touch : Text | Move : { from : Text, to : Text } | Symlink : { from : Text, to : Text } | Chmod : { path : Text, mode : Text } | Echo : Text | Env : { key : Text, value : Text } | Run : { argv : List Text } >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { targets = [ { mapKey = "move-target", mapValue = { deps = ["move_src.txt"], phony = False, recipe = [ < Move = { from = "move_src.txt", to = "move_dst.txt" } > ] } } ], default = "move-target" }
+BUILDEOF
+
+"$BIN" -f build_move.dhall > /tmp/dhake-out12.txt 2> /tmp/dhake-err12.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+grep -q "mv move_src.txt move_dst.txt" /tmp/dhake-out12.txt || { echo "  mv command not found"; ok=0; }
+[ -f move_dst.txt ] || { echo "  move_dst.txt not created"; ok=0; }
+[ ! -f move_src.txt ] || { echo "  move_src.txt should have been removed"; ok=0; }
+grep -q "source content" move_dst.txt || { echo "  content not preserved"; ok=0; }
+check "action-move" "$ok"
+
+# ---- Case 13: Symlink action ----
+write_file symlink_target.txt "link target"
+cat > build_symlink.dhall <<'BUILDEOF'
+let Action = < Shell : Text | Copy : { from : Text, to : Text } | Mkdir : Text | Rm : Text | Touch : Text | Move : { from : Text, to : Text } | Symlink : { from : Text, to : Text } | Chmod : { path : Text, mode : Text } | Echo : Text | Env : { key : Text, value : Text } | Run : { argv : List Text } >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { targets = [ { mapKey = "symlink-target", mapValue = { deps = ["symlink_target.txt"], phony = False, recipe = [ < Symlink = { from = "symlink_target.txt", to = "symlink_link" } > ] } } ], default = "symlink-target" }
+BUILDEOF
+
+"$BIN" -f build_symlink.dhall > /tmp/dhake-out13.txt 2> /tmp/dhake-err13.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+grep -q "ln -s symlink_target.txt symlink_link" /tmp/dhake-out13.txt || { echo "  ln command not found"; ok=0; }
+[ -L symlink_link ] || { echo "  symlink_link should be a symlink"; ok=0; }
+check "action-symlink" "$ok"
+
+# ---- Case 14: Chmod action ----
+write_file chmod_file.txt "chmod test"
+cat > build_chmod.dhall <<'BUILDEOF'
+let Action = < Shell : Text | Copy : { from : Text, to : Text } | Mkdir : Text | Rm : Text | Touch : Text | Move : { from : Text, to : Text } | Symlink : { from : Text, to : Text } | Chmod : { path : Text, mode : Text } | Echo : Text | Env : { key : Text, value : Text } | Run : { argv : List Text } >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { targets = [ { mapKey = "chmod-target", mapValue = { deps = ["chmod_file.txt"], phony = False, recipe = [ < Chmod = { path = "chmod_file.txt", mode = "0444" } > ] } } ], default = "chmod-target" }
+BUILDEOF
+
+"$BIN" -f build_chmod.dhall > /tmp/dhake-out14.txt 2> /tmp/dhake-err14.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+grep -q "chmod 0444 chmod_file.txt" /tmp/dhake-out14.txt || { echo "  chmod command not found"; ok=0; }
+# Check permissions (read-only for owner)
+[ -r chmod_file.txt ] || { echo "  chmod_file.txt should be readable"; ok=0; }
+[ ! -w chmod_file.txt ] || { echo "  chmod_file.txt should not be writable"; ok=0; }
+check "action-chmod" "$ok"
+
+# ---- Case 15: Echo action ----
+cat > build_echo.dhall <<'BUILDEOF'
+let Action = < Shell : Text | Copy : { from : Text, to : Text } | Mkdir : Text | Rm : Text | Touch : Text | Move : { from : Text, to : Text } | Symlink : { from : Text, to : Text } | Chmod : { path : Text, mode : Text } | Echo : Text | Env : { key : Text, value : Text } | Run : { argv : List Text } >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { targets = [ { mapKey = "echo-target", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Echo = "Hello from Echo action" > ] } } ], default = "echo-target" }
+BUILDEOF
+
+"$BIN" -f build_echo.dhall > /tmp/dhake-out15.txt 2> /tmp/dhake-err15.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+grep -q "Hello from Echo action" /tmp/dhake-out15.txt || { echo "  echo output not found"; ok=0; }
+check "action-echo" "$ok"
+
+# ---- Case 16: Env action ----
+cat > build_env.dhall <<'BUILDEOF'
+let Action = < Shell : Text | Copy : { from : Text, to : Text } | Mkdir : Text | Rm : Text | Touch : Text | Move : { from : Text, to : Text } | Symlink : { from : Text, to : Text } | Chmod : { path : Text, mode : Text } | Echo : Text | Env : { key : Text, value : Text } | Run : { argv : List Text } >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { targets = [ { mapKey = "env-target", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Env = { key = "MY_ENV_VAR", value = "test_value" } >, < Shell = "echo $MY_ENV_VAR" > ] } } ], default = "env-target" }
+BUILDEOF
+
+"$BIN" -f build_env.dhall > /tmp/dhake-out16.txt 2> /tmp/dhake-err16.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+grep -q "export MY_ENV_VAR=test_value" /tmp/dhake-out16.txt || { echo "  export not found"; ok=0; }
+grep -q "test_value" /tmp/dhake-out16.txt || { echo "  env var value not printed"; ok=0; }
+check "action-env" "$ok"
+
+# ---- Case 17: Run action ----
+cat > build_run.dhall <<'BUILDEOF'
+let Action = < Shell : Text | Copy : { from : Text, to : Text } | Mkdir : Text | Rm : Text | Touch : Text | Move : { from : Text, to : Text } | Symlink : { from : Text, to : Text } | Chmod : { path : Text, mode : Text } | Echo : Text | Env : { key : Text, value : Text } | Run : { argv : List Text } >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { targets = [ { mapKey = "run-target", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Run = { argv = [ "/bin/echo", "hello", "world" ] } > ] } } ], default = "run-target" }
+BUILDEOF
+
+"$BIN" -f build_run.dhall > /tmp/dhake-out17.txt 2> /tmp/dhake-err17.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+grep -q "/bin/echo hello world" /tmp/dhake-out17.txt || { echo "  run command not found"; ok=0; }
+check "action-run" "$ok"
+
 echo
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

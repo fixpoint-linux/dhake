@@ -19,6 +19,8 @@
 #include "dhall.h"
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <errno.h>
 
@@ -26,12 +28,15 @@
 /* In-memory build plan                                                */
 /* ------------------------------------------------------------------ */
 
-typedef enum { ACT_SHELL, ACT_COPY, ACT_MKDIR, ACT_RM, ACT_TOUCH } ActionKind;
+typedef enum { ACT_SHELL, ACT_COPY, ACT_MKDIR, ACT_RM, ACT_TOUCH,
+                ACT_MOVE, ACT_SYMLINK, ACT_CHMOD, ACT_ECHO, ACT_ENV, ACT_RUN } ActionKind;
 
 typedef struct Action {
     ActionKind kind;
-    char *a;               /* shell command / mkdir / rm / touch path / copy-from */
-    char *b;               /* copy-to (only ACT_COPY) */
+    char *a;               /* shell command / mkdir / rm / touch path / copy-from / move-from / symlink-from / chmod-path / echo-text / env-key / run-program */
+    char *b;               /* copy-to / move-to / symlink-to / chmod-mode / env-value */
+    char **av;             /* argv for Run (NULL for others) */
+    int nav;              /* argc for Run (0 for others) */
     struct Action *next;
 } Action;
 
@@ -45,6 +50,9 @@ typedef struct Target {
     struct Target **dep_targets;   /* resolved Target* per dep */
     int state;             /* 0 unvisited, 1 visiting (cycle), 2 done */
     bool dirty;            /* will (re)build this run */
+    /* parallel scheduler state */
+    int deps_pending;      /* count of unresolved deps (for parallel scheduling) */
+    pid_t pid;             /* 0 if not running */
     struct Target *next;   /* intrusive list */
 } Target;
 
@@ -192,6 +200,47 @@ static Action *map_action(Term *u, const char *target) {
         a->kind = ACT_TOUCH;
         a->a = term_text_cstr(sel->value);
         if (!a->a) die("target '%s': < Touch = ... > value must be Text", target);
+    } else if (!strcmp(tag, "Move")) {
+        a->kind = ACT_MOVE;
+        if (sel->value->tag != TmRecordLit) die("target '%s': Move must be a { from, to } record", target);
+        a->a = rec_need_text(sel->value, "from", target);
+        a->b = rec_need_text(sel->value, "to", target);
+    } else if (!strcmp(tag, "Symlink")) {
+        a->kind = ACT_SYMLINK;
+        if (sel->value->tag != TmRecordLit) die("target '%s': Symlink must be a { from, to } record", target);
+        a->a = rec_need_text(sel->value, "from", target);
+        a->b = rec_need_text(sel->value, "to", target);
+    } else if (!strcmp(tag, "Chmod")) {
+        a->kind = ACT_CHMOD;
+        if (sel->value->tag != TmRecordLit) die("target '%s': Chmod must be a { path, mode } record", target);
+        a->a = rec_need_text(sel->value, "path", target);
+        a->b = rec_need_text(sel->value, "mode", target);
+    } else if (!strcmp(tag, "Echo")) {
+        a->kind = ACT_ECHO;
+        a->a = term_text_cstr(sel->value);
+        if (!a->a) die("target '%s': < Echo = ... > value must be Text", target);
+    } else if (!strcmp(tag, "Env")) {
+        a->kind = ACT_ENV;
+        if (sel->value->tag != TmRecordLit) die("target '%s': Env must be a { key, value } record", target);
+        a->a = rec_need_text(sel->value, "key", target);
+        a->b = rec_need_text(sel->value, "value", target);
+    } else if (!strcmp(tag, "Run")) {
+        a->kind = ACT_RUN;
+        if (sel->value->tag != TmRecordLit) die("target '%s': Run must be a { argv : List Text } record", target);
+        Term *argv_list = rec_get(sel->value, "argv");
+        if (!argv_list) die("target '%s': Run must have an 'argv' field", target);
+        int n = list_length(argv_list);
+        if (n == 0) die("target '%s': Run argv must be non-empty", target);
+        a->av = calloc((size_t)(n + 1), sizeof(char *));
+        if (!a->av) die("out of memory");
+        a->nav = n;
+        int i = 0;
+        for (Term *p = argv_list; p && p->tag == TmCons; p = p->as.cons.tail) {
+            a->av[i++] = term_text_cstr(p->as.cons.head);
+            if (!a->av[i-1]) die("target '%s': Run argv elements must be Text", target);
+        }
+        a->av[n] = NULL;
+        a->a = a->av[0];  /* store program name in a for compatibility */
     } else {
         die("target '%s': unknown action '< %s = ... >'", target, tag);
     }
@@ -436,6 +485,73 @@ static int run_action(Action *a) {
         printf("touch %s\n", a->a);
         fflush(stdout);
         return touch_file(a->a) ? 0 : 1;
+    case ACT_MOVE: {
+        printf("mv %s %s\n", a->a, a->b);
+        fflush(stdout);
+        if (rename(a->a, a->b) != 0) {
+            fprintf(stderr, "dhake: move: %s\n", strerror(errno));
+            return 1;
+        }
+        return 0;
+    }
+    case ACT_SYMLINK: {
+        printf("ln -s %s %s\n", a->a, a->b);
+        fflush(stdout);
+        if (symlink(a->a, a->b) != 0) {
+            fprintf(stderr, "dhake: symlink: %s\n", strerror(errno));
+            return 1;
+        }
+        return 0;
+    }
+    case ACT_CHMOD: {
+        printf("chmod %s %s\n", a->b, a->a);
+        fflush(stdout);
+        char *end = NULL;
+        errno = 0;
+        long mode = strtol(a->b, &end, 8);
+        if (errno != 0 || end == a->b || *end != '\0' || mode < 0 || mode > 07777) {
+            fprintf(stderr, "dhake: chmod: invalid mode '%s' (expected octal 0..7777)\n", a->b);
+            return 1;
+        }
+        if (chmod(a->a, (mode_t)mode) != 0) {
+            fprintf(stderr, "dhake: chmod: %s\n", strerror(errno));
+            return 1;
+        }
+        return 0;
+    }
+    case ACT_ECHO: {
+        printf("%s\n", a->a);
+        fflush(stdout);
+        return 0;
+    }
+    case ACT_ENV: {
+        printf("export %s=%s\n", a->a, a->b);
+        fflush(stdout);
+        setenv(a->a, a->b, 1);
+        return 0;
+    }
+    case ACT_RUN: {
+        printf("%s", a->av[0]);
+        for (int i = 1; i < a->nav; i++) printf(" %s", a->av[i]);
+        printf("\n");
+        fflush(stdout);
+        pid_t pid = fork();
+        if (pid == -1) {
+            fprintf(stderr, "dhake: fork failed for Run: %s\n", strerror(errno));
+            return 2;
+        }
+        if (pid == 0) {
+            /* child */
+            execvp(a->av[0], a->av);
+            fprintf(stderr, "dhake: execvp '%s' failed: %s\n", a->av[0], strerror(errno));
+            _exit(2);
+        }
+        /* parent */
+        int status;
+        waitpid(pid, &status, 0);
+        if (WIFEXITED(status)) return WEXITSTATUS(status);
+        return 2; /* signaled */
+    }
     }
     return 2;
 }
@@ -448,6 +564,17 @@ static void print_action(Action *a) {
     case ACT_MKDIR: printf("mkdir %s\n", a->a); break;
     case ACT_RM:    printf("rm %s\n", a->a); break;
     case ACT_TOUCH: printf("touch %s\n", a->a); break;
+    case ACT_MOVE:  printf("mv %s %s\n", a->a, a->b); break;
+    case ACT_SYMLINK: printf("ln -s %s %s\n", a->a, a->b); break;
+    case ACT_CHMOD: printf("chmod %s %s\n", a->b, a->a); break;
+    case ACT_ECHO:  printf("echo %s\n", a->a); break;
+    case ACT_ENV:   printf("export %s=%s\n", a->a, a->b); break;
+    case ACT_RUN: {
+        printf("%s", a->av[0]);
+        for (int i = 1; i < a->nav; i++) printf(" %s", a->av[i]);
+        printf("\n");
+        break;
+    }
     }
 }
 
@@ -466,10 +593,11 @@ static const char *default_buildfile(void) {
 static void usage(const char *argv0) {
     printf("dhake — a Make-like build tool driven by a Dhall buildfile\n\n");
     printf("Usage:\n");
-    printf("  %s [-f FILE] [-n] [--list] [target ...]\n", argv0);
+    printf("  %s [-f FILE] [-j N] [-n] [--list] [target ...]\n", argv0);
     printf("  %s -h | --help\n\n", argv0);
     printf("Options:\n");
     printf("  -f FILE    buildfile to evaluate (default: ./Dhakefile.dhall, else ./build.dhall)\n");
+    printf("  -j N       run up to N build jobs in parallel (default: 1, sequential)\n");
     printf("  -n         dry run: print the actions that would run, without running them\n");
     printf("  --list     list all targets and exit\n");
     printf("  target     build the named target(s); default: the buildfile's 'default'\n");
@@ -478,6 +606,7 @@ static void usage(const char *argv0) {
 int main(int argc, char **argv) {
     const char *buildfile = default_buildfile();
     bool dry_run = false, want_list = false;
+    int jobs = 1;  /* default: sequential */
     const char **wanted = NULL;
     int nwanted = 0, wanted_cap = 0;
 
@@ -485,6 +614,11 @@ int main(int argc, char **argv) {
         const char *a = argv[i];
         if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else if (!strcmp(a, "-f")) { if (i + 1 >= argc) die("-f requires a file argument"); buildfile = argv[++i]; }
+        else if (!strcmp(a, "-j")) { 
+            if (i + 1 >= argc) die("-j requires a number argument"); 
+            jobs = atoi(argv[++i]); 
+            if (jobs < 1) die("-j must be at least 1"); 
+        }
         else if (!strcmp(a, "-n") || !strcmp(a, "--dry-run")) { dry_run = true; }
         else if (!strcmp(a, "--list")) { want_list = true; }
         else if (a[0] == '-') { die("unknown option '%s'", a); }
@@ -544,59 +678,219 @@ int main(int argc, char **argv) {
         free(stk);
     }
 
-    int failed = 0;
+    /* For parallel scheduling, we need to compute dirty at launch time.
+     * Initialize per-target parallel state and compute deps_pending. */
+    for (Target *t = b->targets; t; t = t->next) {
+        t->deps_pending = 0;
+        t->pid = 0;
+        t->dirty = false;  /* will be computed below */
+    }
+
+    /* Compute deps_pending for each reachable target and initialize ready queue */
     for (int i = 0; i < n; i++) {
         Target *t = order[i];
-        if (t->state != 1) continue;      /* not in requested subgraph */
-
-        /* Up-to-date decision, in topo order (deps already final).
-         * Dirty iff: phony, OR target missing, OR any dep target is dirty,
-         * OR any dep file (target or source) is strictly newer than target,
-         * OR a source-file dep is missing (=> "no rule to make target"). */
-        bool texists = false;
-        long long tm = file_mtime_ns(t->name, &texists);
-        bool dirty = t->phony || !texists;
-        if (!dirty) {
-            for (int j = 0; j < t->ndeps; j++) {
-                Target *d = t->dep_targets[j];
-                if (d) {
-                    if (d->dirty) { dirty = true; break; }
-                    bool dexists = false;
-                    long long dm = file_mtime_ns(d->name, &dexists);
-                    if (!dexists) { dirty = true; break; }
-                    if (dm > tm) { dirty = true; break; }
-                } else {
-                    bool sexists = false;
-                    long long sm = file_mtime_ns(t->deps[j], &sexists);
-                    if (!sexists) die("no rule to make target '%s', needed by '%s'", t->deps[j], t->name);
-                    if (sm > tm) { dirty = true; break; }
-                }
-            }
-        }
-        t->dirty = dirty;
-
-        if (!dirty) {
-            printf("dhake: '%s' is up to date\n", t->name);
-            continue;
-        }
-        if (!t->recipe) {
-            /* dirty with no recipe and not phony: the artifact is missing and
-             * nothing can create it */
-            if (!t->phony) die("no rule to make target '%s'", t->name);
-            continue;                      /* phony grouping target with no actions */
-        }
-        printf("dhake: building '%s'\n", t->name);
-        for (Action *a = t->recipe; a; a = a->next) {
-            int rc = dry_run ? 0 : run_action(a);
-            if (dry_run) print_action(a);
-            if (rc != 0) {
-                fprintf(stderr, "dhake: recipe for target '%s' failed (exit %d)\n", t->name, rc);
-                failed = rc;
-                goto done;
+        if (t->state != 1) continue;  /* not in requested subgraph */
+        for (int j = 0; j < t->ndeps; j++) {
+            Target *d = t->dep_targets[j];
+            if (d && d->state == 1) {
+                t->deps_pending++;
             }
         }
     }
 
-done:
+    /* Ready queue: targets with deps_pending == 0 */
+    Target **ready = malloc((size_t)n * sizeof(Target *));
+    int ready_head = 0, ready_tail = 0;
+    for (int i = 0; i < n; i++) {
+        Target *t = order[i];
+        if (t->state == 1 && t->deps_pending == 0) {
+            ready[ready_tail++] = t;
+        }
+    }
+
+    int failed = 0;
+    int jobs_running = 0;
+
+    /* If dry-run, force sequential (jobs=1) and just print */
+    if (dry_run) {
+        jobs = 1;
+    }
+
+    while ((ready_head < ready_tail && !failed) || jobs_running > 0) {
+        /* Launch ready targets up to jobs limit */
+        while (jobs_running < jobs && ready_head < ready_tail && !failed) {
+            Target *t = ready[ready_head++];
+
+            /* Compute dirty at launch time (all deps are done) */
+            bool texists = false;
+            long long tm = file_mtime_ns(t->name, &texists);
+            bool dirty = t->phony || !texists;
+            if (!dirty) {
+                for (int j = 0; j < t->ndeps; j++) {
+                    Target *d = t->dep_targets[j];
+                    if (d) {
+                        if (d->dirty) { dirty = true; break; }
+                        bool dexists = false;
+                        long long dm = file_mtime_ns(d->name, &dexists);
+                        if (!dexists) { dirty = true; break; }
+                        if (dm > tm) { dirty = true; break; }
+                    } else {
+                        bool sexists = false;
+                        long long sm = file_mtime_ns(t->deps[j], &sexists);
+                        if (!sexists) die("no rule to make target '%s', needed by '%s'", t->deps[j], t->name);
+                        if (sm > tm) { dirty = true; break; }
+                    }
+                }
+            }
+            t->dirty = dirty;
+
+            if (!dirty) {
+                printf("dhake: '%s' is up to date\n", t->name);
+                /* mark done: decrement deps_pending for dependents */
+                for (int i2 = 0; i2 < n; i2++) {
+                    Target *dep = order[i2];
+                    if (dep->state != 1) continue;
+                    for (int j = 0; j < dep->ndeps; j++) {
+                        if (dep->dep_targets[j] == t) {
+                            dep->deps_pending--;
+                            if (dep->deps_pending == 0) {
+                                ready[ready_tail++] = dep;
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if (!t->recipe) {
+                if (!t->phony) die("no rule to make target '%s'", t->name);
+                /* phony with no recipe: mark done */
+                for (int i2 = 0; i2 < n; i2++) {
+                    Target *dep = order[i2];
+                    if (dep->state != 1) continue;
+                    for (int j = 0; j < dep->ndeps; j++) {
+                        if (dep->dep_targets[j] == t) {
+                            dep->deps_pending--;
+                            if (dep->deps_pending == 0) {
+                                ready[ready_tail++] = dep;
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            printf("dhake: building '%s'\n", t->name);
+
+            if (dry_run) {
+                /* dry-run: print actions sequentially, no fork */
+                for (Action *a = t->recipe; a; a = a->next) {
+                    print_action(a);
+                }
+                /* mark done */
+                for (int i2 = 0; i2 < n; i2++) {
+                    Target *dep = order[i2];
+                    if (dep->state != 1) continue;
+                    for (int j = 0; j < dep->ndeps; j++) {
+                        if (dep->dep_targets[j] == t) {
+                            dep->deps_pending--;
+                            if (dep->deps_pending == 0) {
+                                ready[ready_tail++] = dep;
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            /* Fork a child to run the recipe */
+            pid_t pid = fork();
+            if (pid == -1) {
+                fprintf(stderr, "dhake: fork failed: %s\n", strerror(errno));
+                failed = 2;
+                break;
+            }
+
+            if (pid == 0) {
+                /* Child: run the full recipe, then _exit with the result */
+                int rc = 0;
+                for (Action *a = t->recipe; a; a = a->next) {
+                    rc = run_action(a);
+                    if (rc != 0) break;
+                }
+                _exit(rc);
+            }
+
+            /* Parent: record pid and increment jobs_running */
+            t->pid = pid;
+            jobs_running++;
+        }
+
+        /* Reap completed children */
+        if (jobs_running > 0) {
+            int status;
+            pid_t done_pid = waitpid(-1, &status, 0);
+            if (done_pid == -1) {
+                if (errno == EINTR) continue;
+                fprintf(stderr, "dhake: waitpid failed: %s\n", strerror(errno));
+                failed = 2;
+                break;
+            }
+
+            jobs_running--;
+
+            /* Find the target by pid */
+            Target *completed = NULL;
+            for (int i2 = 0; i2 < n; i2++) {
+                Target *t2 = order[i2];
+                if (t2->state == 1 && t2->pid == done_pid) {
+                    completed = t2;
+                    break;
+                }
+            }
+
+            if (!completed) {
+                fprintf(stderr, "dhake: internal error: unknown pid %ld\n", (long)done_pid);
+                failed = 2;
+                break;
+            }
+
+            /* Get exit code */
+            int rc = 0;
+            if (WIFEXITED(status)) {
+                rc = WEXITSTATUS(status);
+            } else {
+                rc = 2;  /* signaled */
+            }
+
+            if (rc != 0 && !failed) {
+                failed = rc;  /* stop scheduling new targets, but keep reaping */
+            }
+
+            /* Mark target as done: decrement deps_pending for dependents.
+             * Only a SUCCESSFUL target unblocks its dependents — a failed one
+             * must not schedule them (they cannot build on a broken dep). */
+            if (rc == 0) {
+                for (int i2 = 0; i2 < n; i2++) {
+                    Target *dep = order[i2];
+                    if (dep->state != 1) continue;
+                    for (int j = 0; j < dep->ndeps; j++) {
+                        if (dep->dep_targets[j] == completed) {
+                            dep->deps_pending--;
+                            if (dep->deps_pending == 0) {
+                                ready[ready_tail++] = dep;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    free(ready);
+    free(roots);
+    free(order);
+    free((void *)wanted);
+
     return failed;
 }

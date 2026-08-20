@@ -45,10 +45,11 @@ rebuilding from source needs the toolchain).
 ## Usage
 
 ```
-dhake [-f FILE] [-n] [--list] [target ...]
+dhake [-f FILE] [-j N] [-n] [--list] [target ...]
 ```
 
 - `-f FILE` — buildfile to evaluate (default: `./Dhakefile.dhall`, else `./build.dhall`)
+- `-j N` — run up to N build jobs in parallel (default: 1, sequential). Stops scheduling new targets on first failure but lets already-running targets finish.
 - `-n` — dry run: print actions without running them
 - `--list` — list targets and exit
 - `target` — build named target(s); default is the buildfile's `default`
@@ -67,6 +68,12 @@ let Action = < Shell : Text
              | Mkdir : Text
              | Rm : Text
              | Touch : Text
+             | Move : { from : Text, to : Text }
+             | Symlink : { from : Text, to : Text }
+             | Chmod : { path : Text, mode : Text }
+             | Echo : Text
+             | Env : { key : Text, value : Text }
+             | Run : { argv : List Text }
              >
 let Target = { deps : List Text, phony : Bool, recipe : List Action }
 in  { targets = List { mapKey : Text, mapValue : Target }
@@ -83,7 +90,10 @@ Each target has:
   Use for `clean`-style targets.
 - **`recipe`** — a list of actions, each a tagged union value the interpreter
   normalizes. `Shell` runs a command via `/bin/sh`; `Copy`/`Mkdir`/`Rm`/`Touch`
-  map to direct libc calls.
+  map to direct libc calls; `Move` renames a file; `Symlink` creates a symbolic link;
+  `Chmod` changes file permissions (mode is octal Text); `Echo` prints text to stdout;
+  `Env` sets an environment variable (affects subsequent actions in the same recipe);
+  `Run` executes a program directly via `execvp` (no shell) with the given argv list.
 
 ### Example
 
@@ -93,6 +103,12 @@ let Action = < Shell : Text
              | Mkdir : Text
              | Rm : Text
              | Touch : Text
+             | Move : { from : Text, to : Text }
+             | Symlink : { from : Text, to : Text }
+             | Chmod : { path : Text, mode : Text }
+             | Echo : Text
+             | Env : { key : Text, value : Text }
+             | Run : { argv : List Text }
              >
 let Target = { deps : List Text, phony : Bool, recipe : List Action }
 in  { targets =

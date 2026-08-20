@@ -62,6 +62,21 @@
 ./dhake.com.dbg --list   # list targets
 ./tests/build.sh ./dhake.com.dbg   # run the test suite</code></pre>
 
+  <h2>Features</h2>
+  <ul>
+    <li><strong>Parallel builds</strong> — <code>-j N</code> runs up to N independent
+    targets concurrently (default 1). On the first failure it stops scheduling new
+    targets but lets already-running ones finish, then returns the failing exit code
+    (make-style).</li>
+    <li><strong>Typed actions</strong> — recipes are Dhall tagged-union values:
+    <code>Shell</code>, <code>Copy</code>, <code>Mkdir</code>, <code>Rm</code>,
+    <code>Touch</code>, <code>Move</code>, <code>Symlink</code>, <code>Chmod</code>,
+    <code>Echo</code>, <code>Env</code>, and <code>Run</code> (exec without a shell).</li>
+    <li><strong>Incremental</strong> — mtime-based up-to-date checks skip unchanged
+    targets.</li>
+    <li><strong>Self-hosting</strong> — dhake builds itself from a Dhakefile.</li>
+  </ul>
+
   <h2>Example Dhakefile.dhall</h2>
 <pre><code>let Action = &lt; Shell : Text | Copy : { from : Text, to : Text }
              | Mkdir : Text | Rm : Text | Touch : Text

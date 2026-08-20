@@ -39,7 +39,7 @@ rebuilding from source needs the toolchain).
 ## Test
 
 ```sh
-./tests/build.sh ./dhake.com.dbg     # 10 end-to-end cases
+./tests/build.sh ./dhake.com.dbg     # 18 end-to-end cases
 ```
 
 ## Usage
@@ -140,11 +140,18 @@ evaluated directly.
 
 - **Dependency graph** — iterative DFS topo-order with 3-color cycle detection.
   Only the subgraph reachable from the requested target(s) is built.
+- **Parallel scheduling (`-j N`)** — a fork/waitpid scheduler launches up to `N`
+  independent (ready) targets concurrently; each target builds in its own child
+  process. Dependencies gate readiness via a `deps_pending` count, and up-to-date
+  decisions are made at launch time once all deps are final. On the first failure
+  it stops scheduling new targets but lets already-running ones finish, then
+  returns the failing exit code (make-style). `-j 1` is the sequential default.
 - **Up-to-date check** — a target is dirty iff it's phony, its file is missing,
   any dependency target is dirty, or any dependency file (target or source) is
   newer than it (nanosecond mtime resolution).
-- **Actions** — `Shell` uses `system()` (verified under cosmocc);
-  `Copy`/`Mkdir`/`Rm`/`Touch` are direct libc calls (no shell-escaping risk).
+- **Actions** — `Shell` uses `system()` and `Run` uses `fork`+`execvp` (no
+  shell); `Copy`/`Mkdir`/`Rm`/`Touch`/`Move`/`Symlink`/`Chmod` are direct libc
+  calls (no shell-escaping risk).
 
 One deliberate design note: the interpreter's *typecheck* pass is skipped. The
 ergonomic shorthand `< Shell = "..." >` is a *singleton* union literal, whose
@@ -158,7 +165,7 @@ reports clear errors.
 ```
 Dhakefile.dhall        self-hosting buildfile (builds dhake.com)
 src/dhake.c            the tool (single file, links dhall-c core)
-tests/build.sh         10 end-to-end cases
+tests/build.sh         18 end-to-end cases
 vendor/dhall-c         dhall-c interpreter (git submodule @ 07a069c)
 docs/                  GitHub Pages site
 .github/workflows/     Pages deploy workflow

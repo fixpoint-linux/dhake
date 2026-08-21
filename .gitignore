@@ -1,3 +1,8 @@
 # Build artifacts: the dhake.com binaries are COMMITTED (bootstrap self-host
 # binaries, following the dhall-c precedent), so only scratch files are ignored.
 .cache/
+
+# Elm docs app — tooling and generated build output (never committed).
+node_modules/
+elm-stuff/
+dist/

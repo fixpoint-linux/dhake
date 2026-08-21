@@ -1,7 +1,9 @@
-# Deploy the static dhake documentation (docs/) to GitHub Pages on every push.
+# Deploy the dhake documentation to GitHub Pages on every push.
 #
-# The docs/ directory is plain committed HTML, so this workflow only uploads it
-# — no toolchain or build step is needed in CI.
+# The page is an Elm app (src/Main.elm) rendered against the shared
+# Fixpoint.* design package (the `design` submodule) and pre-rendered to a
+# static dist/index.html by `npm run build` (elm make + scripts/ssg.mjs).
+# The workflow builds it first, then uploads the generated dist/ directory.
 #
 # Enable once in the repo: Settings -> Pages -> Source -> "GitHub Actions".
 name: Deploy GitHub Pages
@@ -29,15 +31,31 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # The Elm app imports the Fixpoint.* design package from the `design`
+          # git submodule, so it must be checked out for the build.
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Build docs
+        run: |
+          npm ci
+          npm run build
 
       - name: Configure Pages
         uses: actions/configure-pages@v6
 
-      - name: Upload docs
+      - name: Upload built site
         uses: actions/upload-pages-artifact@v5
         with:
-          path: docs
+          path: dist
 
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
+

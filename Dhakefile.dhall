@@ -190,10 +190,10 @@ in  { targets =
               -- inputs, so this pins the artifact. The `design/src` dep is a
               -- directory and cannot be file-hashed, so it is pinned transitively
               -- via this output hash (any change to it changes the elm.js bytes).
-              , hash = "sha256:1642c531ead18bee3dacaa3f1ddc86c7d3d2c7a66c41ebf9d4844492255da2c6"
+              , hash = "sha256:91af636543a49ee2435d91444b16cf46e6d8b8dadc10e4bb5a08ab786b7f7454"
               , depsHash =
                   [ { path = "src/Main.elm"
-                    , hash = "sha256:11ca3a2b82181db41c531ed35d60551c564fbcdc686c1d2db7e2760da2683c57"
+                    , hash = "sha256:b0dba58f7726b69e632aa394df77874e3190dbed0f125b37948ffe964246881d"
                     }
                   , { path = "elm.json"
                     , hash = "sha256:e7fe37330383367eb15ef45d0461c840f74b2b6a9764dbf66dea2e59ba0edd99"
@@ -219,7 +219,7 @@ in  { targets =
               -- build). The ssg output is byte-deterministic for identical inputs.
               -- `dist/elm.js` (a target) and `vendor-mfe` (phony, multi-file) are
               -- verified transitively via this output hash.
-              , hash = "sha256:cd4845175bdcdcca871281cb15ac68ccbd072342e66054b13363f332ea39cef0"
+              , hash = "sha256:b82a5714e1222be979f052fc1c23a84497a97538d6849369ccb9374d958337fc"
               , depsHash =
                   [ { path = "shell/index.html"
                     , hash = "sha256:30b7a3675ed9af3ba31869b16ef4bcc933e09184799e69cea3897bb80d068fb0"

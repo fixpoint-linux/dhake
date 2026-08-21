@@ -253,6 +253,14 @@ Copy the `sha256:new...` value into the buildfile's `hash` / `depsHash` fields a
 commit. `--warn-hash-mismatch` only relaxes *hash* verification — other errors
 (missing files, recipe failures) still abort the build.
 
+- **`--verify` / `--check`** — verify all pinned hashes and up-to-dateness without
+  running recipes (CI pre-flight). This complements `-n` (dry-run): where dry-run
+  shows what *would* run, verify checks whether anything *needs* to run. Exits
+  nonzero if any non-phony reachable target is dirty (needs rebuild) or any hash
+  (dep or output) mismatches. Phony targets are reported as "always runs" and never
+  trigger a nonzero exit by themselves. No lockfile is written in verify mode, and
+  no recipes are executed.
+
 ### Lockfile / SBOM
 
 dhake can export a **lockfile** (machine-readable manifest / SBOM) after a successful

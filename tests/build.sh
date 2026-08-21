@@ -977,6 +977,113 @@ ok=1
 check "lockfile-dry-run-no-write" "$ok"
 rm -f lockc custom.lock dhake.lock build_lock_C.dhall
 
+# ---- Verify mode tests ----
+
+# ---- Case V1: verify-clean-up-to-date ----
+# Build a target with correct hash, then verify it's up to date
+HASH_V1=$(printf 'verify-v1-content' | sha256sum | cut -d' ' -f1)
+cat > build_verify_v1.dhall <<BUILDEOF
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, hash : Text }
+in  { targets = [ { mapKey = "verify_v1.txt", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'verify-v1-content' > verify_v1.txt" > ], hash = "sha256:$HASH_V1" } } ], default = "verify_v1.txt" }
+BUILDEOF
+
+rm -f verify_v1.txt
+"$BIN" -f build_verify_v1.dhall > /tmp/dhake-out-v1.txt 2> /tmp/dhake-err-v1.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+# Now verify it's up to date
+"$BIN" -f build_verify_v1.dhall --verify > /tmp/dhake-out-v1b.txt 2> /tmp/dhake-err-v1b.txt
+rc=$?
+[ "$rc" -eq 0 ] || { echo "  verify expected exit 0, got $rc"; ok=0; }
+grep -q "up to date" /tmp/dhake-out-v1b.txt || { echo "  'up to date' not found in verify output"; cat /tmp/dhake-out-v1b.txt; ok=0; }
+check "verify-clean-up-to-date" "$ok"
+rm -f verify_v1.txt build_verify_v1.dhall
+
+# ---- Case V2: verify-needs-rebuild ----
+# Target output missing (don't build first), verify should report needs rebuild
+cat > build_verify_v2.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets = [ { mapKey = "verify_v2.txt", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'v2' > verify_v2.txt" > ] } } ], default = "verify_v2.txt" }
+BUILDEOF
+
+rm -f verify_v2.txt
+"$BIN" -f build_verify_v2.dhall --verify > /tmp/dhake-out-v2.txt 2> /tmp/dhake-err-v2.txt
+rc=$?
+ok=1
+[ "$rc" -ne 0 ] || { echo "  verify expected non-zero exit, got $rc"; ok=0; }
+grep -q "needs rebuild" /tmp/dhake-out-v2.txt || { echo "  'needs rebuild' not found in verify output"; cat /tmp/dhake-out-v2.txt; ok=0; }
+[ ! -f verify_v2.txt ] || { echo "  verify_v2.txt should not exist (no recipe ran)"; ok=0; }
+check "verify-needs-rebuild" "$ok"
+rm -f verify_v2.txt build_verify_v2.dhall
+
+# ---- Case V3: verify-dep-hash-mismatch ----
+# Dep file tampered, verify should report hash mismatch
+HASH_V3=$(printf 'original-dep-content\n' | sha256sum | cut -d' ' -f1)
+printf 'original-dep-content\n' > verify_v3_dep.txt
+cat > build_verify_v3.dhall <<BUILDEOF
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, depsHash : List { path : Text, hash : Text } }
+in  { targets = [ { mapKey = "verify_v3.txt", mapValue = { deps = ["verify_v3_dep.txt"], phony = False, recipe = [ < Shell = "cp verify_v3_dep.txt verify_v3.txt" > ], depsHash = [ { path = "verify_v3_dep.txt", hash = "sha256:$HASH_V3" } ] } } ], default = "verify_v3.txt" }
+BUILDEOF
+
+# Tamper the dep file
+printf 'tampered-dep-content\n' > verify_v3_dep.txt
+"$BIN" -f build_verify_v3.dhall --verify > /tmp/dhake-out-v3.txt 2> /tmp/dhake-err-v3.txt
+rc=$?
+ok=1
+[ "$rc" -ne 0 ] || { echo "  verify expected non-zero exit, got $rc"; ok=0; }
+grep -q "dep hash mismatch" /tmp/dhake-out-v3.txt || { echo "  'dep hash mismatch' not found in verify output"; cat /tmp/dhake-out-v3.txt; ok=0; }
+[ ! -f verify_v3.txt ] || { echo "  verify_v3.txt should not exist (no recipe ran)"; ok=0; }
+check "verify-dep-hash-mismatch" "$ok"
+rm -f verify_v3.txt verify_v3_dep.txt build_verify_v3.dhall
+
+# ---- Case V4: verify-output-hash-mismatch ----
+# Build with correct hash, then tamper output file AND set its mtime to the past
+# so it appears up-to-date by mtime, but hash should catch it
+HASH_V4=$(printf 'original-output\n' | sha256sum | cut -d' ' -f1)
+cat > build_verify_v4.dhall <<BUILDEOF
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, hash : Text }
+in  { targets = [ { mapKey = "verify_v4.txt", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'original-output\\n' > verify_v4.txt" > ], hash = "sha256:$HASH_V4" } } ], default = "verify_v4.txt" }
+BUILDEOF
+
+rm -f verify_v4.txt
+"$BIN" -f build_verify_v4.dhall > /tmp/dhake-out-v4.txt 2> /tmp/dhake-err-v4.txt
+rc=$?
+[ "$rc" -eq 0 ] || { echo "  initial build expected exit 0, got $rc"; ok=0; }
+# Tamper the output file but set mtime to the past
+printf 'tampered-output\n' > verify_v4.txt
+touch -d '2020-01-01' verify_v4.txt
+"$BIN" -f build_verify_v4.dhall --verify > /tmp/dhake-out-v4b.txt 2> /tmp/dhake-err-v4b.txt
+rc=$?
+ok=1
+[ "$rc" -ne 0 ] || { echo "  verify expected non-zero exit, got $rc"; ok=0; }
+grep -q "output hash mismatch" /tmp/dhake-out-v4b.txt || { echo "  'output hash mismatch' not found in verify output"; cat /tmp/dhake-out-v4b.txt; ok=0; }
+check "verify-output-hash-mismatch" "$ok"
+rm -f verify_v4.txt build_verify_v4.dhall
+
+# ---- Case V5: verify-no-recipe-run ----
+# A target whose recipe writes a sentinel file; run --verify without building
+# should report needs rebuild and sentinel should NOT exist
+cat > build_verify_v5.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets = [ { mapKey = "verify_v5.txt", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'v5' > verify_v5.txt && echo SENTINEL > verify_v5_sentinel.txt" > ] } } ], default = "verify_v5.txt" }
+BUILDEOF
+
+rm -f verify_v5.txt verify_v5_sentinel.txt
+"$BIN" -f build_verify_v5.dhall --verify > /tmp/dhake-out-v5.txt 2> /tmp/dhake-err-v5.txt
+rc=$?
+ok=1
+[ "$rc" -ne 0 ] || { echo "  verify expected non-zero exit, got $rc"; ok=0; }
+grep -q "needs rebuild" /tmp/dhake-out-v5.txt || { echo "  'needs rebuild' not found in verify output"; cat /tmp/dhake-out-v5.txt; ok=0; }
+[ ! -f verify_v5_sentinel.txt ] || { echo "  verify_v5_sentinel.txt should NOT exist (recipe did not run)"; ok=0; }
+check "verify-no-recipe-run" "$ok"
+rm -f verify_v5.txt verify_v5_sentinel.txt build_verify_v5.dhall
+
 rm -f netprobe.c netprobe build_denyNetwork.dhall build_denyNetwork_unix.dhall build_no_denyNetwork.dhall build_denyNetwork_failclosed.dhall
 
 echo

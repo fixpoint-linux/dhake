@@ -338,6 +338,10 @@ static DepHash *parse_dep_hash_list(Term *rec, const char *where, int *n_out) {
  * (printing the actual hash so the buildfile can be updated) instead of aborting. */
 static bool warn_hash_mismatch = false;
 
+/* When --verify/--check is given, verify all pinned hashes + up-to-dateness
+ * without running recipes (CI pre-flight). */
+static bool want_verify = false;
+
 /* Human-readable name of a hash algorithm, for building "<algo>:<hex>" specs. */
 static const char *hash_algo_name(HashAlg alg) {
     switch (alg) {
@@ -1432,10 +1436,87 @@ static void write_lockfile(Build *b, const char *path) {
     printf("dhake: wrote lockfile %s\n", path);
 }
 
+/* Verify all pinned hashes and up-to-dateness without running recipes.
+ * Returns 0 if everything is clean, nonzero if anything is dirty or mismatched. */
+static int run_verify(Target **order, int n) {
+    int failed = 0;
+    for (int i = 0; i < n; i++) {
+        Target *t = order[i];
+        if (t->state != 1) continue;  /* only requested subgraph */
+
+        /* FIRST verify all dep hashes non-fatally */
+        for (int j = 0; j < t->ndep_hash; j++) {
+            char got[65];
+            if (!file_hash(&t->dep_hash[j].hash, t->dep_hash[j].path, got)) {
+                printf("target '%s': dep hash: file '%s' not found\n", t->name, t->dep_hash[j].path);
+                failed = 1;
+            } else if (strcmp(got, t->dep_hash[j].hash.hex)) {
+                printf("target '%s': dep hash mismatch for '%s': expected %s, got %s:%s\n",
+                       t->name, t->dep_hash[j].path, t->dep_hash[j].hash.spec,
+                       hash_algo_name(t->dep_hash[j].hash.alg), got);
+                failed = 1;
+            }
+        }
+
+        /* Handle phony targets */
+        if (t->phony) {
+            printf("dhake: verify: '%s' phony (always runs)\n", t->name);
+            t->dirty = true;
+            continue;
+        }
+
+        /* Compute dirty with the same logic as the build launch block */
+        bool texists = false;
+        long long tm = file_mtime_ns(t->name, &texists);
+        bool dirty = !texists;
+        if (!dirty) {
+            for (int j = 0; j < t->ndeps; j++) {
+                Target *d = t->dep_targets[j];
+                if (d) {
+                    if (d->dirty) { dirty = true; break; }
+                    bool dexists = false;
+                    long long dm = file_mtime_ns(d->name, &dexists);
+                    if (!dexists) { dirty = true; break; }
+                    if (dm > tm) { dirty = true; break; }
+                } else {
+                    bool sexists = false;
+                    long long sm = file_mtime_ns(t->deps[j], &sexists);
+                    if (!sexists) { dirty = true; break; }
+                    if (sm > tm) { dirty = true; break; }
+                }
+            }
+        }
+        t->dirty = dirty;
+
+        if (dirty) {
+            printf("dhake: verify: '%s' needs rebuild\n", t->name);
+            failed = 1;
+        } else {
+            /* up-to-date, non-phony: verify output hash if present */
+            if (t->out_hash != NULL) {
+                char got[65];
+                if (!file_hash(t->out_hash, t->name, got)) {
+                    printf("target '%s': output not found\n", t->name);
+                    failed = 1;
+                } else if (strcmp(got, t->out_hash->hex)) {
+                    printf("target '%s': output hash mismatch: expected %s, got %s:%s\n",
+                           t->name, t->out_hash->spec, hash_algo_name(t->out_hash->alg), got);
+                    failed = 1;
+                } else {
+                    printf("dhake: verify: '%s' up to date\n", t->name);
+                }
+            } else {
+                printf("dhake: verify: '%s' up to date\n", t->name);
+            }
+        }
+    }
+    return failed;
+}
+
 static void usage(const char *argv0) {
     printf("dhake — a Make-like build tool driven by a Dhall buildfile\n\n");
     printf("Usage:\n");
-    printf("  %s [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--lock[=FILE]] [target ...]\n", argv0);
+    printf("  %s [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--verify|--check] [--lock[=FILE]] [target ...]\n", argv0);
     printf("  %s -h | --help\n\n", argv0);
     printf("Options:\n");
     printf("  -f FILE    buildfile to evaluate (default: ./Dhakefile.dhall, else ./build.dhall)\n");
@@ -1445,6 +1526,9 @@ static void usage(const char *argv0) {
     printf("  --warn-hash-mismatch\n");
     printf("             report verified-build hash mismatches as warnings (printing the\n");
     printf("             actual hash) instead of failing, so pinned hashes can be updated\n");
+    printf("  --verify / --check\n");
+    printf("             verify all pinned hashes and up-to-dateness without running recipes\n");
+    printf("             (CI pre-flight); exits nonzero if anything is dirty or mismatched\n");
     printf("  --lock[=FILE]\n");
     printf("             write a lockfile (dhake.lock, or FILE if =FILE given) with\n");
     printf("             actual hashes and transitive dependencies after a successful build\n");
@@ -1470,6 +1554,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-n") || !strcmp(a, "--dry-run")) { dry_run = true; }
         else if (!strcmp(a, "--list")) { want_list = true; }
         else if (!strcmp(a, "--warn-hash-mismatch")) { warn_hash_mismatch = true; }
+        else if (!strcmp(a, "--verify") || !strcmp(a, "--check")) { want_verify = true; }
         else if (!strcmp(a, "--lock")) { lock_path = "dhake.lock"; }
         else if (!strncmp(a, "--lock=", 7)) { lock_path = a + 7; }
         else if (a[0] == '-') { die("unknown option '%s'", a); }
@@ -1545,6 +1630,12 @@ int main(int argc, char **argv) {
             }
         }
         free(stk);
+    }
+
+    if (want_verify) {
+        int vrc = run_verify(order, n);
+        free(roots); free(order); free((void *)wanted);
+        return vrc;
     }
 
     /* For parallel scheduling, we need to compute dirty at launch time.

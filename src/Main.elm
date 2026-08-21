@@ -314,6 +314,16 @@ featuresSection =
                         , text " behaviour, while legacy bare-path usage stays non-recursive."
                         ]
                     }
+                , Fixpoint.Card.view
+                    { n = "10"
+                    , title = "Lockfile / SBOM"
+                    , body =
+                        [ Fixpoint.Code.inline "--lock[=FILE]"
+                        , text " writes a machine-readable "
+                        , Fixpoint.Code.inline "dhake.lock"
+                        , text " after a successful build: every target's output and dep hashes plus its transitive dependency closure. A commit-and-diff supply-chain artifact for CI and provenance tools."
+                        ]
+                    }
                 ]
             ]
         }

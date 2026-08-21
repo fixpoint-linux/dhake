@@ -138,6 +138,8 @@ headerView =
         , tagline =
             [ b [] [ text "Dhall" ]
             , text " is total, terminating, and typechecked — so your build definition always means exactly what it says. Typed actions · incremental · parallel · "
+            , b [] [ text "hash-verified" ]
+            , text " · "
             , b [] [ text "self-hosting" ]
             , text "."
             ]
@@ -260,11 +262,52 @@ featuresSection =
                     }
                 , Fixpoint.Card.view
                     { n = "06"
-                    , title = "Self-hosting"
+                    , title = "Self-hosting, verified"
                     , body =
                         [ text "A single "
                         , Fixpoint.Code.inline "cosmocc"
-                        , text " APE that runs on Linux, macOS, Windows, and the BSDs — and builds itself."
+                        , text " APE that runs on Linux, macOS, Windows, and the BSDs — and builds itself, with every source and the produced binary pinned by hash."
+                        ]
+                    }
+                , Fixpoint.Card.view
+                    { n = "07"
+                    , title = "Verified builds"
+                    , body =
+                        [ Fixpoint.Code.inline "hash"
+                        , text " / "
+                        , Fixpoint.Code.inline "depsHash"
+                        , text " pin the expected sha256 of outputs and source deps, checked before and after every build. Mismatches fail hard — unless you pass "
+                        , Fixpoint.Code.inline "--warn-hash-mismatch"
+                        , text ", which prints the new hash so pins are trivial to update."
+                        ]
+                    }
+                , Fixpoint.Card.view
+                    { n = "08"
+                    , title = "Sandboxing (Landlock)"
+                    , body =
+                        [ text "Opt-in write-containment: recipes can only write under the build tree, "
+                        , Fixpoint.Code.inline "/tmp"
+                        , text ", and an explicit "
+                        , Fixpoint.Code.inline "unveil"
+                        , text " whitelist. A rogue or buggy recipe can’t touch the rest of your disk."
+                        ]
+                    }
+                , Fixpoint.Card.view
+                    { n = "09"
+                    , title = "Recursive Mkdir / Rm"
+                    , body =
+                        [ Fixpoint.Code.inline "Mkdir"
+                        , text " and "
+                        , Fixpoint.Code.inline "Rm"
+                        , text " support "
+                        , Fixpoint.Code.inline "parents"
+                        , text " / "
+                        , Fixpoint.Code.inline "recursive"
+                        , text " flags for "
+                        , Fixpoint.Code.inline "mkdir -p"
+                        , text " and "
+                        , Fixpoint.Code.inline "rm -rf"
+                        , text " behaviour, while legacy bare-path usage stays non-recursive."
                         ]
                     }
                 ]
@@ -284,6 +327,15 @@ exampleSection =
         , hint = "// targets = List { mapKey, mapValue } · default required"
         , children =
             [ Fixpoint.Code.block exampleCodeBlock
+            , p []
+                [ text "Add optional "
+                , Fixpoint.Code.inline "hash"
+                , text " and "
+                , Fixpoint.Code.inline "depsHash"
+                , text " fields to pin the expected sha256 of outputs and source deps, and a top-level "
+                , Fixpoint.Code.inline "sandbox"
+                , text " block to run every recipe in a Landlock write-containment sandbox — see the README."
+                ]
             ]
         }
 

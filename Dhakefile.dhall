@@ -182,6 +182,20 @@ in  { targets =
           , mapValue =
               { deps = [ "src/Main.elm", "elm.json", "design/src" ]
               , phony = False
+              -- expected sha256 of the produced dist/elm.js (verified after build).
+              -- elm 0.19.2 --optimize output is byte-deterministic for identical
+              -- inputs, so this pins the artifact. The `design/src` dep is a
+              -- directory and cannot be file-hashed, so it is pinned transitively
+              -- via this output hash (any change to it changes the elm.js bytes).
+              , sha256 = "91adf0edc28ee03699e2ea0bd353ab43db00a9219c29d0737fb4d0eddb253d68"
+              , depsSha256 =
+                  [ { path = "src/Main.elm"
+                    , sha256 = "47fb4969c2805e2fbbe1701e08df653a4efcaf9304f4d8de3bafbaa8db640e79"
+                    }
+                  , { path = "elm.json"
+                    , sha256 = "e7fe37330383367eb15ef45d0461c840f74b2b6a9764dbf66dea2e59ba0edd99"
+                    }
+                  ]
               , recipe =
                   [ < Shell =
                         "node_modules/elm/bin/elm make src/Main.elm --output=dist/elm.js --optimize"
@@ -198,6 +212,19 @@ in  { targets =
                   , "scripts/ssg.mjs"
                   ]
               , phony = False
+              -- expected sha256 of the produced dist/index.html (verified after
+              -- build). The ssg output is byte-deterministic for identical inputs.
+              -- `dist/elm.js` (a target) and `vendor-mfe` (phony, multi-file) are
+              -- verified transitively via this output hash.
+              , sha256 = "cbf4395fbc9748557909bb5cc83ede280e840ed11e1696c87d76e17726b0b5f1"
+              , depsSha256 =
+                  [ { path = "shell/index.html"
+                    , sha256 = "30b7a3675ed9af3ba31869b16ef4bcc933e09184799e69cea3897bb80d068fb0"
+                    }
+                  , { path = "scripts/ssg.mjs"
+                    , sha256 = "ab39937ddb13b3b639fc7fd6bc4c5eeaae04ca1e1c63b53f712015a5c257adf1"
+                    }
+                  ]
               , recipe = [ < Shell = "node scripts/ssg.mjs" > ]
               }
           }

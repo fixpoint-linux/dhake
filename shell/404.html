@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dhake — a Make-like build tool driven by Dhall</title>
+<meta name="description" content="dhake: a Make-like build tool whose buildfile is a Dhall expression, compiled with cosmocc into a portable APE. Self-hosting.">
+<!--
+  shell/404.html — the GitHub Pages SPA fallback (copied to dist/404.html by
+  scripts/ssg.mjs).
+
+  GitHub Pages serves the site's 404.html for any unmatched path — e.g. the SPA
+  deep link /dhake/fixpoint-linux. Without this, such a path would render the
+  plain GitHub "404" page with NO styling (the reported "styling goes missing"
+  bug on refresh/deep-link). Because the browser's URL at that moment has extra
+  path segments, every asset reference below is ABSOLUTE (basePath-scoped, i.e.
+  /dhake/...) so it resolves regardless of the requested subpath.
+
+  The #app root is empty and has no `ssr` attribute: shell/shell.js derives the
+  basePath /dhake, sees a non-home path, does a fresh client render, and mounts
+  the target route's MFE (with its inline <style>) — restoring full styling.
+-->
+<script type="importmap">
+{
+  "imports": {
+    "@mfe/core": "/dhake/vendor/@mfe/core/index.js",
+    "@mfe/framework": "/dhake/vendor/@mfe/framework/index.js",
+    "dhake-page": "/dhake/shell/mfe/dhake-page.js",
+    "fixpoint-landing": "https://fixpointlinux.org/shell/mfe/fixpoint-landing.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="app"></div>
+<script type="module" src="/dhake/shell/shell.js"></script>
+</body>
+</html>

@@ -79,7 +79,16 @@ export default {
     // holds the pre-rendered markup. Clearing first guarantees a single,
     // drift-free render from Elm regardless of which case we're in.
     clearChildren(element);
-    const app = Elm.Main.init({ node: element });
+    // Elm.Main.init({node}) replaces the given node with its rendered root via
+    // parentNode.replaceChild. Initializing into the [data-mfe] slot element
+    // ITSELF would therefore strip the slot's data-mfe attribute and break
+    // @mfe/core's reconcile slot-tracking. Mount into a fresh INNER wrapper div
+    // instead: the slot element stays in the DOM (data-mfe intact) and Elm
+    // replaces only the wrapper, leaving the Elm root (including the <style>
+    // emitted by Fixpoint.Style.stylesheet) as the slot's child.
+    const inner = document.createElement('div');
+    element.appendChild(inner);
+    const app = Elm.Main.init({ node: inner });
     live.set(element, app);
   },
 

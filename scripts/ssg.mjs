@@ -189,6 +189,11 @@ async function main() {
   cpSync(join(ROOT, 'shell'), join(DIST, 'shell'), { recursive: true });
   cpSync(join(ROOT, 'vendor', '@mfe'), join(DIST, 'vendor', '@mfe'), { recursive: true });
 
+  // GitHub Pages SPA fallback: serve the app shell (with absolute /dhake/... paths)
+  // for unmatched deep links (e.g. /dhake/fixpoint-linux) so they render styled
+  // instead of the plain GitHub 404 page. Must sit at the Pages root.
+  cpSync(join(ROOT, 'shell', '404.html'), join(DIST, '404.html'));
+
   log(`wrote ${OUTPUT} (${finalHtml.length} bytes)`);
 }
 

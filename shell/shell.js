@@ -34,7 +34,12 @@ const app = await createApp({
     { path: '/fixpoint-linux', template: 'fixpoint', name: 'fixpoint' },
   ],
   basePath,
-  baseURL: './shell/templates',
+  // Absolute, basePath-scoped template URL. On a GitHub Pages deep link (e.g.
+  // /dhake/fixpoint-linux) the requested path has extra segments, so a relative
+  // baseURL like './shell/templates' would resolve to the wrong location and
+  // the route template would 404. Resolving against basePath (e.g. '/dhake')
+  // yields '/dhake/shell/templates' regardless of the deep-link subpath.
+  baseURL: `${basePath.replace(/\/+$/, '')}/shell/templates`,
   ssr: isHome,
 });
 

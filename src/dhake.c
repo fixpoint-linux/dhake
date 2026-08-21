@@ -89,6 +89,7 @@ typedef struct {
     char *default_name;    /* NULL if none */
     /* landlock sandbox config (from optional top-level `sandbox` field) */
     bool sandbox_enabled;
+    bool sandbox_read_exec; /* when true, also handle READ_FILE|READ_DIR|EXECUTE */
     char **unveil;         /* global "perms:path" whitelist entries */
     int nunveil;
     int landlock_abi;      /* probe result; <1 => unavailable */
@@ -549,11 +550,12 @@ static Build *build_plan(Term *root) {
     Term *default_t = rec_get(root, "default");
     if (default_t) b->default_name = term_text_cstr(default_t);
 
-    /* optional sandbox config: { enable : Bool, unveil : List Text } */
+    /* optional sandbox config: { enable : Bool, readExec : Bool, unveil : List Text } */
     Term *sb = rec_get(root, "sandbox");
     if (sb) {
-        if (sb->tag != TmRecordLit) die("buildfile: 'sandbox' must be a record { enable, unveil }");
+        if (sb->tag != TmRecordLit) die("buildfile: 'sandbox' must be a record { enable, readExec, unveil }");
         b->sandbox_enabled = rec_bool(sb, "enable", false, "buildfile");
+        b->sandbox_read_exec = rec_bool(sb, "readExec", false, "buildfile");
         b->unveil = parse_unveil_list(sb, "buildfile", &b->nunveil);
     }
 
@@ -714,13 +716,15 @@ static bool touch_file(const char *path) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Landlock sandboxing (write-containment, v1)                         */
+/* Landlock sandboxing (write-containment + optional read/execute)      */
 /*                                                                     */
-/* Each recipe child applies a Landlock ruleset that handles ONLY the  */
-/* WRITE-class rights. READ/EXECUTE are deliberately left unhandled so */
-/* exec() of any tool (dynamic loader + libs + /bin/sh symlink) keeps  */
-/* working without unveiling every exec path. A rogue/buggy recipe can */
-/* write only under the unveiled directories (cwd, /tmp, whitelist).   */
+/* Each recipe child applies a Landlock ruleset. By default (v1) it   */
+/* handles ONLY the WRITE-class rights. When sandbox.readExec=True,   */
+/* READ_FILE, READ_DIR, and EXECUTE are also handled, and the standard  */
+/* toolchain directories are auto-unveiled so builds can still compile */
+/* and run programs. A rogue recipe can only read/exec under unveiled  */
+/* directories. When readExec=False, READ/EXECUTE are left unhandled so */
+/* exec() of any tool keeps working without unveiling every exec path. */
 /* ------------------------------------------------------------------ */
 
 static bool landlock_warned = false;
@@ -741,10 +745,27 @@ static int landlock_write_handled(int abi) {
     return (int)h;
 }
 
-/* Map a perms string ({r,w,c,x}) to enforced write-class rights. `w` ->
- * WRITE_FILE (+REFER/TRUNCATE per ABI); `c` -> make/remove rights; `r` and
- * `x` are parsed but INERT in v1 (READ/EXECUTE are not handled). */
-static unsigned long landlock_perms_rights(const char *perms, int abi) {
+/* Return the full handled access mask based on sandbox_read_exec flag. */
+static int landlock_handled_mask(Build *b) {
+    unsigned long h = landlock_write_handled(b->landlock_abi);
+    if (b->sandbox_read_exec) {
+        h |= LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_EXECUTE;
+    }
+    return (int)h;
+}
+
+/* Map a perms string ({r,w,c,x}) to landlock rights. `w` -> WRITE_FILE
+ * (+REFER/TRUNCATE per ABI); `c` -> make/remove rights; `r` -> READ_FILE|READ_DIR;
+ * `x` -> EXECUTE.
+ *
+ * `read_exec` must be TRUE for the r/x mappings to be emitted. This is required
+ * for correctness, NOT just documentation: when read/execute are not handled
+ * (readExec=False, the write-containment default), the kernel REJECTS a rule
+ * whose allowed_access includes rights absent from the ruleset's
+ * handled_access_fs mask (landlock_add_rule returns EINVAL). So in write-only
+ * mode, r/x must map to zero to keep the cwd/tmp auto-unveil rules valid and
+ * preserve the exact previous behavior. */
+static unsigned long landlock_perms_rights(const char *perms, int abi, bool read_exec) {
     unsigned long h = 0;
     for (const char *p = perms; *p; p++) {
         if (*p == 'w') {
@@ -757,6 +778,10 @@ static unsigned long landlock_perms_rights(const char *perms, int abi) {
                | LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK
                | LANDLOCK_ACCESS_FS_MAKE_SYM
                | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE;
+        } else if (*p == 'r' && read_exec) {
+            h |= LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+        } else if (*p == 'x' && read_exec) {
+            h |= LANDLOCK_ACCESS_FS_EXECUTE;
         }
     }
     return h;
@@ -796,11 +821,11 @@ static void landlock_parse_entry(const char *entry, char *perms, size_t perms_sz
 }
 
 /* Add one whitelist entry ("perms:path"), expanding a leading ~ to $HOME. */
-static void landlock_allow_entry(int rfd, const char *entry, int abi) {
+static void landlock_allow_entry(int rfd, const char *entry, int abi, bool read_exec) {
     char perms[8];
     const char *path;
     landlock_parse_entry(entry, perms, sizeof perms, &path);
-    unsigned long rights = landlock_perms_rights(perms, abi);
+    unsigned long rights = landlock_perms_rights(perms, abi, read_exec);
     if (rights == 0) return;          /* e.g. a pure "r:path" entry in v1 */
     char *expanded = NULL;
     if (path[0] == '~' && (path[1] == '/' || path[1] == '\0')) {
@@ -815,47 +840,87 @@ static void landlock_allow_entry(int rfd, const char *entry, int abi) {
     free(expanded);
 }
 
-/* Apply the write-containment sandbox to the CURRENT process (called in the
- * recipe child right after fork). Landlock restricts this thread + its
- * future children, so builtin actions, system()'s /bin/sh, and ACT_RUN's
- * exec child are all covered. All failures are non-fatal (build continues
- * unsandboxed) but emit a single warning. */
+/* Auto-unveil standard toolchain directories for read/execute containment.
+ * Bin dirs get READ_FILE|READ_DIR|EXECUTE, lib dirs get READ_FILE|READ_DIR|EXECUTE,
+ * include dirs get READ_FILE|READ_DIR. Non-existent paths are silently skipped. */
+static void landlock_auto_read_exec(int rfd) {
+    unsigned long r_x = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_EXECUTE;
+    unsigned long r   = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+
+    /* Bin dirs (R|X) */
+    landlock_allow(rfd, "/usr/bin", r_x);
+    landlock_allow(rfd, "/bin", r_x);
+    landlock_allow(rfd, "/usr/sbin", r_x);
+    landlock_allow(rfd, "/sbin", r_x);
+    landlock_allow(rfd, "/usr/local/bin", r_x);
+
+    /* Lib dirs (R|X) */
+    landlock_allow(rfd, "/usr/lib", r_x);
+    landlock_allow(rfd, "/lib", r_x);
+    landlock_allow(rfd, "/usr/lib64", r_x);
+    landlock_allow(rfd, "/lib64", r_x);
+    landlock_allow(rfd, "/usr/local/lib", r_x);
+
+    /* Include dirs (R) */
+    landlock_allow(rfd, "/usr/include", r);
+    landlock_allow(rfd, "/usr/local/include", r);
+}
+
+/* Apply the sandbox to the CURRENT process (called in the recipe child right
+ * after fork). Landlock restricts this thread + its future children, so
+ * builtin actions, system()'s /bin/sh, and ACT_RUN's exec child are all
+ * covered.
+ *
+ * Fail-open vs fail-closed: in write-containment mode (readExec=False) a
+ * landlock failure is non-fatal — the recipe runs unsandboxed with a single
+ * warning, so buildfiles keep working on kernels/CI that block landlock. But
+ * when readExec=True the user has EXPLICITLY opted into read/execute
+ * containment; running unsandboxed would silently defeat that guarantee, so
+ * we fail CLOSED: abort the recipe child with a clear error. */
+static void sandbox_fail(Build *b, const char *why) {
+    fprintf(stderr, "dhake: %s: landlock sandbox unavailable (requested): %s\n",
+            b->sandbox_read_exec ? "error" : "warning", why);
+    if (b->sandbox_read_exec) {
+        fprintf(stderr, "dhake: readExec=True requested read/execute containment but landlock could not be established; aborting to avoid running unsandboxed\n");
+        _exit(3);
+    }
+    if (!landlock_warned) landlock_warned = true;
+}
+
 static void sandbox_child(Build *b, Target *t) {
     if (!b->sandbox_enabled) return;
-    if (b->landlock_abi < 1) return;  /* unavailable; warned at probe */
+    if (b->landlock_abi < 1) { sandbox_fail(b, "landlock unsupported by kernel"); return; }
 
-    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
-        if (!landlock_warned) { landlock_warned = true; fprintf(stderr, "dhake: warning: landlock sandbox unavailable (requested): prctl: %s\n", strerror(errno)); }
-        return;
-    }
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) { sandbox_fail(b, strerror(errno)); return; }
 
-    struct landlock_ruleset_attr attr = { .handled_access_fs = landlock_write_handled(b->landlock_abi) };
+    struct landlock_ruleset_attr attr = { .handled_access_fs = landlock_handled_mask(b) };
     int rfd = landlock_create_ruleset(&attr, sizeof attr, 0);
-    if (rfd < 0) {
-        if (!landlock_warned) { landlock_warned = true; fprintf(stderr, "dhake: warning: landlock sandbox unavailable (requested): create_ruleset: %s\n", strerror(errno)); }
-        return;
-    }
+    if (rfd < 0) { sandbox_fail(b, strerror(errno)); return; }
 
     /* auto-unveil: build dir + /tmp + $TMPDIR + device nulls */
-    unsigned long rwc = landlock_perms_rights("rwc", b->landlock_abi);
-    landlock_allow(rfd, ".", rwc);
-    landlock_allow(rfd, "/tmp", rwc);
+    /* Use rwcx for cwd and /tmp so outputs and node_modules can be executed.
+     * When readExec is off, r/x map to zero (not handled), so this reduces to
+     * the previous write-containment rwc behavior. */
+    unsigned long rwcx = landlock_perms_rights("rwcx", b->landlock_abi, b->sandbox_read_exec);
+    landlock_allow(rfd, ".", rwcx);
+    landlock_allow(rfd, "/tmp", rwcx);
     const char *td = getenv("TMPDIR");
-    if (td && *td && strcmp(td, "/tmp")) landlock_allow(rfd, td, rwc);
-    landlock_allow(rfd, "/dev/null", LANDLOCK_ACCESS_FS_WRITE_FILE);
-    landlock_allow(rfd, "/dev/zero", LANDLOCK_ACCESS_FS_WRITE_FILE);
-    landlock_allow(rfd, "/dev/full", LANDLOCK_ACCESS_FS_WRITE_FILE);
-    landlock_allow(rfd, "/dev/tty", LANDLOCK_ACCESS_FS_WRITE_FILE);
+    if (td && *td && strcmp(td, "/tmp")) landlock_allow(rfd, td, rwcx);
+    landlock_allow(rfd, "/dev/null", LANDLOCK_ACCESS_FS_WRITE_FILE | (b->sandbox_read_exec ? LANDLOCK_ACCESS_FS_READ_FILE : 0));
+    landlock_allow(rfd, "/dev/zero", LANDLOCK_ACCESS_FS_WRITE_FILE | (b->sandbox_read_exec ? LANDLOCK_ACCESS_FS_READ_FILE : 0));
+    landlock_allow(rfd, "/dev/full", LANDLOCK_ACCESS_FS_WRITE_FILE | (b->sandbox_read_exec ? LANDLOCK_ACCESS_FS_READ_FILE : 0));
+    landlock_allow(rfd, "/dev/tty", LANDLOCK_ACCESS_FS_WRITE_FILE | (b->sandbox_read_exec ? LANDLOCK_ACCESS_FS_READ_FILE : 0));
+
+    /* Auto-unveil toolchain dirs when readExec is enabled */
+    if (b->sandbox_read_exec) {
+        landlock_auto_read_exec(rfd);
+    }
 
     /* global then per-target whitelist */
-    for (int i = 0; i < b->nunveil; i++) landlock_allow_entry(rfd, b->unveil[i], b->landlock_abi);
-    if (t) for (int i = 0; i < t->nunveil; i++) landlock_allow_entry(rfd, t->unveil[i], b->landlock_abi);
+    for (int i = 0; i < b->nunveil; i++) landlock_allow_entry(rfd, b->unveil[i], b->landlock_abi, b->sandbox_read_exec);
+    if (t) for (int i = 0; i < t->nunveil; i++) landlock_allow_entry(rfd, t->unveil[i], b->landlock_abi, b->sandbox_read_exec);
 
-    if (landlock_restrict_self(rfd, 0) != 0) {
-        if (!landlock_warned) { landlock_warned = true; fprintf(stderr, "dhake: warning: landlock sandbox unavailable (requested): restrict_self: %s\n", strerror(errno)); }
-        close(rfd);
-        return;
-    }
+    if (landlock_restrict_self(rfd, 0) != 0) { sandbox_fail(b, strerror(errno)); close(rfd); return; }
     close(rfd);
 }
 
@@ -1113,9 +1178,16 @@ int main(int argc, char **argv) {
     if (b->sandbox_enabled) {
         b->landlock_abi = landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
         if (b->landlock_abi < 1) {
+            const char *why = (b->landlock_abi < 0) ? strerror(errno) : "kernel lacks landlock support";
+            if (b->sandbox_read_exec) {
+                /* readExec explicitly requested read/execute containment; failing
+                 * open would silently defeat it, so fail the whole build here. */
+                fprintf(stderr, "dhake: error: readExec=True requested read/execute containment but landlock is unavailable (%s)\n", why);
+                fprintf(stderr, "dhake: aborting to avoid running recipes unsandboxed; disable readExec or enable landlock\n");
+                exit(3);
+            }
             landlock_warned = true;
-            fprintf(stderr, "dhake: warning: landlock sandbox unavailable (requested): %s\n",
-                    (b->landlock_abi < 0) ? strerror(errno) : "kernel lacks landlock support");
+            fprintf(stderr, "dhake: warning: landlock sandbox unavailable (requested): %s\n", why);
         }
     }
 

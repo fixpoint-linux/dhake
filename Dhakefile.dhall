@@ -12,17 +12,20 @@
 -- first copy from source.
 --
 -- ─── optional landlock sandbox ────────────────────────────────────────────
--- Add a top-level `sandbox = { enable, unveil }` field to run each recipe in
--- a write-containment Landlock sandbox (see README "Sandboxing (Landlock)"):
+-- Add a top-level `sandbox = { enable, readExec, unveil }` field to run each
+-- recipe in a Landlock sandbox (see README "Sandboxing (Landlock)"):
 --
 --     , sandbox = { enable = True
+--                 , readExec = True    -- optional: also restrict READ/EXECUTE
 --                 , unveil = [ "rwc:~/.npm", "rwc:~/.cache", "rwc:~/.elm" ]
 --                 }
 --
--- unveil entries are "perms:path" (default rwc); w/c are enforced in v1,
--- r/x are parsed but inert. A leading ~ expands to $HOME. If landlock is
--- unavailable (older kernel / non-Linux), dhake warns once and runs
--- unsandboxed, so builds keep working everywhere.
+-- unveil entries are "perms:path" (default rwc). When readExec=False (default),
+-- w/c are enforced (write/create/remove) and r/x are parsed but inert. When
+-- readExec=True, r/x are also enforced (READ_FILE|READ_DIR and EXECUTE), and
+-- standard toolchain dirs are auto-unveiled. A leading ~ expands to $HOME.
+-- If landlock is unavailable (older kernel / non-Linux), dhake warns once and
+-- runs unsandboxed, so builds keep working everywhere.
 -- ──────────────────────────────────────────────────────────────────────────
 
 let Action =
@@ -123,11 +126,11 @@ in  { targets =
               { deps = [ "src/dhake.c" ] # core
               , phony = False
               -- expected hash of the produced dhake.com (verified after build)
-              , hash = "sha256:b45b94c4e63a3cbd1305b9c23c245639c0b35e563d43b04812b82b366f126a20"
+              , hash = "sha256:e2c5cfe13fad15ae905b8f31929a7b516b12e31f51535fc6a8ff7de94b3bb8ae"
               -- expected hash of each source dep (verified before build)
               , depsHash =
                   [ { path = "src/dhake.c"
-                    , hash = "sha256:f5a1cbf11e6da5bde324e889ff7e44cc2f3d32421c7acacd9bcb73ca304ce24c"
+                    , hash = "sha256:92f45480a1e405562f7160e8b80b839be5747f5bcd518c8fa369424fc5dea6a4"
                     }
                   ] # coreHashes
               , recipe =
@@ -190,10 +193,10 @@ in  { targets =
               -- inputs, so this pins the artifact. The `design/src` dep is a
               -- directory and cannot be file-hashed, so it is pinned transitively
               -- via this output hash (any change to it changes the elm.js bytes).
-              , hash = "sha256:91af636543a49ee2435d91444b16cf46e6d8b8dadc10e4bb5a08ab786b7f7454"
+              , hash = "sha256:669ca3b8bcbab527552842bb3b1dff84ebf1c207a6dd21a34657d24076c71df9"
               , depsHash =
                   [ { path = "src/Main.elm"
-                    , hash = "sha256:b0dba58f7726b69e632aa394df77874e3190dbed0f125b37948ffe964246881d"
+                    , hash = "sha256:854c6b8d100ad26e7a5720093e54b938121f79937be0f4de39f2daa351141548"
                     }
                   , { path = "elm.json"
                     , hash = "sha256:e7fe37330383367eb15ef45d0461c840f74b2b6a9764dbf66dea2e59ba0edd99"
@@ -219,7 +222,7 @@ in  { targets =
               -- build). The ssg output is byte-deterministic for identical inputs.
               -- `dist/elm.js` (a target) and `vendor-mfe` (phony, multi-file) are
               -- verified transitively via this output hash.
-              , hash = "sha256:b82a5714e1222be979f052fc1c23a84497a97538d6849369ccb9374d958337fc"
+              , hash = "sha256:6cea636c88e09f363e95cb4e7f245c9ccc4c3475c0e385c35b111bcb2af57f08"
               , depsHash =
                   [ { path = "shell/index.html"
                     , hash = "sha256:30b7a3675ed9af3ba31869b16ef4bcc933e09184799e69cea3897bb80d068fb0"

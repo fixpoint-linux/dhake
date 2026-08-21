@@ -285,11 +285,13 @@ featuresSection =
                     { n = "08"
                     , title = "Sandboxing (Landlock)"
                     , body =
-                        [ text "Opt-in write-containment: recipes can only write under the build tree, "
+                        [ text "Opt-in write-containment by default — recipes can only write under the build tree, "
                         , Fixpoint.Code.inline "/tmp"
                         , text ", and an explicit "
                         , Fixpoint.Code.inline "unveil"
-                        , text " whitelist. A rogue or buggy recipe can’t touch the rest of your disk."
+                        , text " whitelist. Set "
+                        , Fixpoint.Code.inline "readExec"
+                        , text " to also restrict reads and execs to the toolchain. A rogue recipe can’t touch the rest of your disk."
                         ]
                     }
                 , Fixpoint.Card.view
@@ -367,6 +369,8 @@ exampleCodeBlock =
     , text "\n"
     , Fixpoint.Code.k "in"
     , text "  { sandbox = { enable = "
+    , Fixpoint.Code.g "True"
+    , text ", readExec = "
     , Fixpoint.Code.g "True"
     , text ", unveil = [ "
     , Fixpoint.Code.g "\"rwc:~/.cache\""

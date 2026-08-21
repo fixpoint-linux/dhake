@@ -83,7 +83,7 @@ let Target = { deps : List Text, phony : Bool, recipe : List Action
              }
 in  { targets = List { mapKey : Text, mapValue : Target }
     , default : Text
-    , sandbox : Optional { enable : Bool, unveil : List Text }
+    , sandbox : Optional { enable : Bool, readExec : Bool, unveil : List Text }
     }
 ```
 
@@ -143,15 +143,19 @@ in  { targets = ...
     }
 ```
 
-**Model (write containment).** The ruleset handles **only the WRITE-class rights** (write/create/remove/rename). READ and EXECUTE are deliberately left unrestricted, so recipes can still exec any tool (the shell, `cc`, `node`, …) and read any file — but a rogue or buggy recipe **cannot write outside the unveiled directories**. Landlock has no `chmod`/`chown` right, so those still work.
+**Model.** By default (write containment), the ruleset handles **only the WRITE-class rights** (write/create/remove/rename). READ and EXECUTE are deliberately left unrestricted, so recipes can still exec any tool (the shell, `cc`, `node`, …) and read any file — but a rogue or buggy recipe **cannot write outside the unveiled directories**. Landlock has no `chmod`/`chown` right, so those still work.
 
-**What is unveiled automatically.** The build directory (cwd), `/tmp`, `$TMPDIR`, and `/dev/{null,zero,full,tty}` — all read-write. Everything else is write-denied unless listed in `unveil`.
+When `sandbox.readExec = True`, READ_FILE, READ_DIR, and EXECUTE are also handled. In this mode, recipes **cannot read or execute outside the unveiled directories** — but the standard toolchain directories (`/usr/bin`, `/usr/lib`, `/usr/include`, etc.) are **auto-unveiled** with appropriate permissions so builds can still compile and run programs. A rogue recipe cannot read `/etc/passwd` or scan home directories.
 
-**The `unveil` whitelist.** Entries are `"perms:path"`; the default perms are `rwc`. `w` and `c` are enforced in v1 (write/create/remove); `r` and `x` are parsed but inert (they'll take effect when READ/EXECUTE containment is added). A leading `~` expands to `$HOME`. You can also give a **per-target** `unveil` list to whitelist extra paths for just that target (e.g. a test that needs a system file). Global and per-target unveils aggregate.
+**What is unveiled automatically.** The build directory (cwd), `/tmp`, `$TMPDIR`, and `/dev/{null,zero,full,tty}` — all read-write-execute (cwd and /tmp get EXECUTE so outputs can be run). When `readExec = True`, the standard toolchain directories are also auto-unveiled: bin dirs (`/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`, `/usr/local/bin`) with READ+EXECUTE; lib dirs (`/usr/lib`, `/lib`, `/usr/lib64`, `/lib64`, `/usr/local/lib`) with READ+EXECUTE; include dirs (`/usr/include`, `/usr/local/include`) with READ only.
+
+**The `unveil` whitelist.** Entries are `"perms:path"`; the default perms are `rwc`. `w` and `c` are enforced (write/create/remove); `r` maps to READ_FILE|READ_DIR; `x` maps to EXECUTE. A leading `~` expands to `$HOME`. You can also give a **per-target** `unveil` list to whitelist extra paths for just that target (e.g. a test that needs a system file). Global and per-target unveils aggregate.
 
 **Limitations.** Landlock rules are on *inodes*, so a path must exist when the rule is added — unveiling a not-yet-created leaf file is a no-op. Unveil a directory (or the parent of a to-be-created file) instead. And because rules are per-inode, deleting an unveiled path re-veils it. The write-containment model sidesteps the missing-output-file problem entirely: outputs under the build tree are covered by the cwd rule.
 
-**Fallback.** If landlock is unavailable (kernel < 5.13 or non-Linux), dhake prints a single warning (`landlock sandbox unavailable`) and runs the build **unsandboxed**, so the same buildfile works everywhere. This is what you get in a CI sandbox that blocks the landlock syscall.
+**Fallback.** If landlock is unavailable (kernel < 5.13 or non-Linux), dhake's behavior depends on the mode:
+- **write-containment (`readExec = False`, default):** prints a single warning (`landlock sandbox unavailable`) and runs the build **unsandboxed**, so the same buildfile works everywhere (e.g. in a CI sandbox that blocks the landlock syscall).
+- **`readExec = True`:** **fails closed** — dhake aborts the build with a clear error rather than running recipes unsandboxed. Because `readExec` explicitly requests read/execute containment, silently skipping it would defeat the security guarantee. Disable `readExec` (or run on a landlock-capable host) to proceed.
 
 ### Shell recipes
 

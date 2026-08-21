@@ -680,6 +680,124 @@ grep -qE 'sha256:[0-9a-f]{64}' /tmp/dhake-err33.txt || { echo "  actual sha256:<
 [ -f out33.txt ] || { echo "  out33.txt not created (recipe should still run)"; ok=0; }
 check "warn-hash-mismatch-dep" "$ok"
 
+# ---- Case 34: Landlock readExec — deny reading /etc/passwd ----
+# With sandbox.readExec=True and no explicit unveil for /etc, reading /etc/passwd
+# is denied. Conditional on landlock availability (same as cases 22-24).
+cat > build_readExec_deny.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { sandbox = { enable = True, readExec = True, unveil = [] : List Text }
+   , targets = [ { mapKey = "deny-read", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Shell = "head -c1 /etc/passwd" > ] } } ], default = "deny-read" }
+BUILDEOF
+
+"$BIN" -f build_readExec_deny.dhall > /tmp/dhake-out34.txt 2> /tmp/dhake-err34.txt
+rc=$?
+ok=1
+if [ "$rc" -ne 0 ]; then
+    :   # landlock active: read denied, recipe failed
+elif grep -q 'landlock sandbox unavailable' /tmp/dhake-err34.txt; then
+    :   # landlock unavailable: fallback warning
+else
+    echo "  expected denial OR 'landlock sandbox unavailable' warning (rc=$rc)"; ok=0
+fi
+check "readExec-deny-read-etc" "$ok"
+
+# ---- Case 35: Landlock readExec — allow real cc build ----
+# With sandbox.readExec=True and empty unveil, a real cc build+run should still
+# succeed because toolchain dirs are auto-unveiled. Conditional on landlock.
+write_file hello_readExec.c '#include <stdio.h>
+int main(void) { puts("readExec hello"); return 0; }'
+
+cat > build_readExec_cc.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { sandbox = { enable = True, readExec = True, unveil = [] : List Text }
+   , targets = [ { mapKey = "cc-readExec", mapValue = { deps = ["hello_readExec.c"], phony = False, recipe = [ < Shell = "cc -o hello_readExec hello_readExec.c && ./hello_readExec" > ] } } ], default = "cc-readExec" }
+BUILDEOF
+
+"$BIN" -f build_readExec_cc.dhall > /tmp/dhake-out35.txt 2> /tmp/dhake-err35.txt
+rc=$?
+ok=1
+if [ "$rc" -eq 0 ] && [ -x ./hello_readExec ]; then
+    :   # landlock active: build succeeded
+    ./hello_readExec > /tmp/hello_readExec_out.txt 2>&1
+    grep -q 'readExec hello' /tmp/hello_readExec_out.txt || { echo "  hello_readExec output incorrect"; ok=0; }
+elif grep -q 'landlock sandbox unavailable' /tmp/dhake-err35.txt; then
+    :   # landlock unavailable: fallback warning
+else
+    echo "  expected success OR 'landlock sandbox unavailable' warning (rc=$rc)"; ok=0
+fi
+check "readExec-allow-cc-build" "$ok"
+
+# ---- Case 36: Landlock readExec — /dev/null is readable ----
+# With readExec=True, /dev/null must be both readable and writable (a very
+# common `foo < /dev/null` idiom). Regression guard for the device unveils
+# gaining READ alongside WRITE in readExec mode.
+cat > build_readExec_devnull.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { sandbox = { enable = True, readExec = True, unveil = [] : List Text }
+   , targets = [ { mapKey = "devnull", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Shell = "cat < /dev/null; test $? -eq 0" > ] } } ], default = "devnull" }
+BUILDEOF
+
+"$BIN" -f build_readExec_devnull.dhall > /tmp/dhake-out36.txt 2> /tmp/dhake-err36.txt
+rc=$?
+ok=1
+if [ "$rc" -eq 0 ]; then
+    :   # landlock active: /dev/null readable + writable
+elif grep -q 'landlock sandbox unavailable' /tmp/dhake-err36.txt; then
+    :   # landlock unavailable: fallback warning
+else
+    echo "  expected /dev/null read success OR 'landlock sandbox unavailable' warning (rc=$rc)"; ok=0
+fi
+check "readExec-devnull-readable" "$ok"
+
+# ---- Case 37: Landlock default (no readExec) — backward compat ----
+# ---- Case 37: Landlock default (no readExec) — backward compat ----
+# With sandbox.enable=True but readExec=False (default), a normal write inside
+# cwd should still succeed (regression guard for backward compatibility).
+cat > build_no_readExec.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { sandbox = { enable = True, unveil = [] : List Text }
+   , targets = [ { mapKey = "no-readExec", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Shell = "echo backward_compat > no_readExec.txt" > ] } } ], default = "no-readExec" }
+BUILDEOF
+
+"$BIN" -f build_no_readExec.dhall > /tmp/dhake-out37.txt 2> /tmp/dhake-err37.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f no_readExec.txt ] || { echo "  no_readExec.txt not created"; ok=0; }
+grep -q 'backward_compat' no_readExec.txt || { echo "  content incorrect"; ok=0; }
+check "no-readExec-backward-compat" "$ok"
+
+# ---- Case 38: Landlock readExec — fail CLOSED when landlock unavailable ----
+# readExec explicitly requests read/execute containment. If landlock cannot be
+# established, dhake must ABORT (fail closed, rc=3) rather than run the recipe
+# unsandboxed — silently skipping read containment would defeat the guarantee.
+# Only exercised where landlock is unavailable; where it IS available (host),
+# the build succeeds normally (both are correct, so accept either).
+cat > build_readExec_failclosed.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { sandbox = { enable = True, readExec = True, unveil = [] : List Text }
+   , targets = [ { mapKey = "fc", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Shell = "touch readExec_fc_marker" > ] } } ], default = "fc" }
+BUILDEOF
+
+rm -f readExec_fc_marker
+"$BIN" -f build_readExec_failclosed.dhall > /tmp/dhake-out38.txt 2> /tmp/dhake-err38.txt
+rc=$?
+ok=1
+if [ "$rc" -eq 0 ] && [ -f readExec_fc_marker ]; then
+    :   # landlock available: build succeeded and ran
+elif [ "$rc" -eq 3 ] && grep -q 'aborting to avoid running recipes unsandboxed' /tmp/dhake-err38.txt && [ ! -f readExec_fc_marker ]; then
+    :   # landlock unavailable: fail-closed abort, recipe did NOT run
+else
+    echo "  expected success OR fail-closed abort (rc=3) without running recipe (rc=$rc)"; ok=0
+fi
+rm -f readExec_fc_marker
+check "readExec-fail-closed" "$ok"
+
 echo
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

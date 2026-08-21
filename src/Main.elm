@@ -105,7 +105,7 @@ navView =
                 , text "://dhake"
                 ]
         , links =
-            [ Fixpoint.Nav.homeLink "https://fixpointlinux.org/" "fixpoint-linux"
+            [ Fixpoint.Nav.homeLink "/dhake/fixpoint-linux" "fixpoint-linux"
             , Fixpoint.Nav.link "#build" "build"
             , Fixpoint.Nav.link "#features" "features"
             , Fixpoint.Nav.link "#example" "example"

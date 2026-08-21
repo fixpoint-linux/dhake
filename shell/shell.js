@@ -20,11 +20,22 @@ const basePath = (() => {
   return first ? `/${first}` : '/';
 })();
 
+// The SSG output only pre-renders the home route; a deep link/refresh on a
+// remote route must do a fresh client render instead of rehydrating the
+// pre-rendered home DOM into the wrong route. Compare the (base-stripped)
+// pathname against basePath to decide whether we're on the home route.
+const isHome =
+  (window.location.pathname.replace(/\/+$/, '') || '/') === basePath;
+
 const app = await createApp({
   root: document.getElementById('app'),
-  routes: [{ path: '/', template: 'dhake', name: 'home' }],
+  routes: [
+    { path: '/', template: 'dhake', name: 'home' },
+    { path: '/fixpoint-linux', template: 'fixpoint', name: 'fixpoint' },
+  ],
   basePath,
   baseURL: './shell/templates',
+  ssr: isHome,
 });
 
 // Expose the app handle so the shell/host can inspect or drive it later.

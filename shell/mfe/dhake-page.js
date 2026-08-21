@@ -15,12 +15,29 @@
 // indirect eval does (its `this` is the window/globalThis). Hence fetch+eval,
 // mirroring the SSG probe that validated this seam.
 
-const ELM_URL = './dist/elm.js';
+const ELM_URL = new URL('../../elm.js', import.meta.url).href;
 
 // Cache the load promise so the bundle is fetched and evaluated exactly once.
 let elmPromise = null;
 
-/** Fetch + indirectly-eval the compiled Elm bundle and return the Elm object. */
+// Every compiled Elm bundle is `(function(scope){ ... })(this)`, registering
+// its modules on `scope` (defaulting to globalThis). Loading a SECOND bundle
+// via indirect eval would overwrite the shared globalThis.Elm, so
+// _Platform_export -> _Platform_mergeExportsProd would hit the existing
+// `Main` -> `init` key and _Debug_crash(6) ("name clash"). Each MFE therefore
+// evaluates its own bundle into a PRIVATE scope object, giving every Elm app
+// its own `Elm` and avoiding the global collision entirely — crucial when two
+// sites' MFEs load in the same shell page.
+function evalBundle(code) {
+  const scope = {};
+  // new Function body is the bundle; calling it with .call(scope) binds the
+  // bundle's `(this)` to `scope`, so Elm lands on scope.Elm, not globalThis.
+  // eslint-disable-next-line no-new-func -- CSP constraints match indirect eval.
+  new Function(code).call(scope);
+  return scope.Elm;
+}
+
+/** Fetch + scoped-eval the compiled Elm bundle and return the Elm object. */
 function loadElm() {
   if (!elmPromise) {
     elmPromise = (async () => {
@@ -29,10 +46,7 @@ function loadElm() {
         throw new Error(`dhake-page: failed to fetch ${ELM_URL} (HTTP ${res.status})`);
       }
       const code = await res.text();
-      // eslint-disable-next-line no-eval -- indirect eval runs in global scope,
-      // where the bundle's IIFE `(this)` binds to globalThis and defines Elm.
-      (0, eval)(code);
-      const Elm = globalThis.Elm;
+      const Elm = evalBundle(code);
       if (!Elm || !Elm.Main || typeof Elm.Main.init !== 'function') {
         throw new Error('dhake-page: dist/elm.js did not expose Elm.Main.init');
       }

@@ -198,6 +198,7 @@ static Hash parse_hash(const char *spec, const char *where) {
 /* Compute SHA-256 hex digest of a file. out must be a 65-byte buffer (64 hex chars + NUL).
  * Returns true on success, false on file error. */
 static bool file_sha256_hex(const char *path, char out[65]);
+static long long file_mtime_ns(const char *path, bool *exists);
 
 /* Compute hash of a file. out must be a 65-byte buffer (64 hex chars + NUL).
  * Returns true on success, false on file error. */
@@ -342,6 +343,10 @@ static bool warn_hash_mismatch = false;
  * without running recipes (CI pre-flight). */
 static bool want_verify = false;
 
+/* When --hash-uptodate / --content-addressed is given, use content hashing
+ * instead of mtime comparison for verified targets (those pinning a depsHash). */
+static bool hash_uptodate = false;
+
 /* Human-readable name of a hash algorithm, for building "<algo>:<hex>" specs. */
 static const char *hash_algo_name(HashAlg alg) {
     switch (alg) {
@@ -391,6 +396,55 @@ static int verify_output_hash(Target *t) {
             t->name, t->out_hash->spec, got);
     }
     return 0;
+}
+
+/* Hash-based up-to-date check (content-addressed builds).
+ * Returns: 1 = dirty (rebuild), 0 = up-to-date, -1 = not applicable.
+ *
+ * Applicable only when --hash-uptodate is set, the target is non-phony, and the
+ * target pins at least one dep hash (depsHash). Up-to-dateness is then decided by
+ * CONTENT instead of mtime: a pinned input is "changed" iff its current hash
+ * differs from its pinned hash (a touch that leaves content identical is NOT a
+ * change). Output must exist, and a rebuilt target-dep propagates dirtiness.
+ * Unpinned source deps fall back to the mtime comparison, so targets with a
+ * partial depsHash stay correct. */
+static int hash_uptodate_dirty(Target *t) {
+    if (!hash_uptodate || t->phony || t->ndep_hash == 0) return -1;
+
+    /* Output must exist */
+    bool texists = false;
+    (void)file_mtime_ns(t->name, &texists);
+    if (!texists) return 1;
+
+    /* A target-dep that will be rebuilt forces a rebuild of this target too */
+    for (int j = 0; j < t->ndeps; j++) {
+        Target *d = t->dep_targets[j];
+        if (d && d->dirty) return 1;
+    }
+
+    long long tm = file_mtime_ns(t->name, NULL);
+    for (int j = 0; j < t->ndeps; j++) {
+        Target *d = t->dep_targets[j];
+        if (d) continue;  /* target deps handled above */
+        const char *path = t->deps[j];
+        /* If this source file has a pinned dep hash, compare by content. */
+        const DepHash *pin = NULL;
+        for (int k = 0; k < t->ndep_hash; k++) {
+            if (!strcmp(t->dep_hash[k].path, path)) { pin = &t->dep_hash[k]; break; }
+        }
+        if (pin) {
+            char got[65];
+            if (!file_hash(&pin->hash, path, got)) return 1;  /* missing input */
+            if (strcmp(got, pin->hash.hex)) return 1;          /* content changed */
+        } else {
+            /* Unpinned source dep: mtime fallback (source newer than output) */
+            bool sexists = false;
+            long long sm = file_mtime_ns(path, &sexists);
+            if (!sexists) return 1;
+            if (sm > tm) return 1;
+        }
+    }
+    return 0;  /* up-to-date */
 }
 
 /* ------------------------------------------------------------------ */
@@ -697,7 +751,11 @@ static long long file_mtime_ns(const char *path, bool *exists) {
     if (stat(path, &st) != 0) { if (exists) *exists = false; return 0; }
     if (exists) *exists = true;
     long long ns = (long long)st.st_mtime * 1000000000LL;
-#if defined(__linux__)
+#if defined(__linux__) || defined(__COSMOCC__) || defined(__cosmopolitan__)
+    /* cosmopolitan (cosmocc) is a polyglot toolchain: __linux__ is NOT defined
+     * by it, yet its stat struct always carries st_mtim.tv_nsec. Guard on the
+     * compiler/toolchain macros so nanosecond mtime resolution is preserved
+     * (otherwise sub-second staleness would never trigger a rebuild). */
     ns += st.st_mtim.tv_nsec;
 #endif
     return ns;
@@ -1466,23 +1524,29 @@ static int run_verify(Target **order, int n) {
         }
 
         /* Compute dirty with the same logic as the build launch block */
-        bool texists = false;
-        long long tm = file_mtime_ns(t->name, &texists);
-        bool dirty = !texists;
-        if (!dirty) {
-            for (int j = 0; j < t->ndeps; j++) {
-                Target *d = t->dep_targets[j];
-                if (d) {
-                    if (d->dirty) { dirty = true; break; }
-                    bool dexists = false;
-                    long long dm = file_mtime_ns(d->name, &dexists);
-                    if (!dexists) { dirty = true; break; }
-                    if (dm > tm) { dirty = true; break; }
-                } else {
-                    bool sexists = false;
-                    long long sm = file_mtime_ns(t->deps[j], &sexists);
-                    if (!sexists) { dirty = true; break; }
-                    if (sm > tm) { dirty = true; break; }
+        int hash_result = hash_uptodate_dirty(t);
+        bool dirty;
+        if (hash_result >= 0) {
+            dirty = (hash_result == 1);
+        } else {
+            bool texists = false;
+            long long tm = file_mtime_ns(t->name, &texists);
+            dirty = !texists;
+            if (!dirty) {
+                for (int j = 0; j < t->ndeps; j++) {
+                    Target *d = t->dep_targets[j];
+                    if (d) {
+                        if (d->dirty) { dirty = true; break; }
+                        bool dexists = false;
+                        long long dm = file_mtime_ns(d->name, &dexists);
+                        if (!dexists) { dirty = true; break; }
+                        if (dm > tm) { dirty = true; break; }
+                    } else {
+                        bool sexists = false;
+                        long long sm = file_mtime_ns(t->deps[j], &sexists);
+                        if (!sexists) { dirty = true; break; }
+                        if (sm > tm) { dirty = true; break; }
+                    }
                 }
             }
         }
@@ -1516,7 +1580,7 @@ static int run_verify(Target **order, int n) {
 static void usage(const char *argv0) {
     printf("dhake — a Make-like build tool driven by a Dhall buildfile\n\n");
     printf("Usage:\n");
-    printf("  %s [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--verify|--check] [--lock[=FILE]] [target ...]\n", argv0);
+    printf("  %s [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--verify|--check] [--lock[=FILE]] [--hash-uptodate|--content-addressed] [target ...]\n", argv0);
     printf("  %s -h | --help\n\n", argv0);
     printf("Options:\n");
     printf("  -f FILE    buildfile to evaluate (default: ./Dhakefile.dhall, else ./build.dhall)\n");
@@ -1532,6 +1596,12 @@ static void usage(const char *argv0) {
     printf("  --lock[=FILE]\n");
     printf("             write a lockfile (dhake.lock, or FILE if =FILE given) with\n");
     printf("             actual hashes and transitive dependencies after a successful build\n");
+    printf("  --hash-uptodate / --content-addressed\n");
+    printf("             for targets that pin dep hashes (depsHash), decide up-to-dateness\n");
+    printf("             by content hashing instead of mtime comparison (ignores touch on\n");
+    printf("             unchanged files); a content change still requires re-pinning the\n");
+    printf("             dep hash (or --warn-hash-mismatch) before it can rebuild; only\n");
+    printf("             affects verified targets, others use mtime\n");
     printf("  target     build the named target(s); default: the buildfile's 'default'\n");
 }
 
@@ -1557,6 +1627,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--verify") || !strcmp(a, "--check")) { want_verify = true; }
         else if (!strcmp(a, "--lock")) { lock_path = "dhake.lock"; }
         else if (!strncmp(a, "--lock=", 7)) { lock_path = a + 7; }
+        else if (!strcmp(a, "--hash-uptodate") || !strcmp(a, "--content-addressed")) { hash_uptodate = true; }
         else if (a[0] == '-') { die("unknown option '%s'", a); }
         else { if (nwanted == wanted_cap) { wanted_cap = wanted_cap ? wanted_cap * 2 : 4; wanted = realloc(wanted, (size_t)wanted_cap * sizeof(char *)); } wanted[nwanted++] = a; }
     }
@@ -1682,23 +1753,29 @@ int main(int argc, char **argv) {
             Target *t = ready[ready_head++];
 
             /* Compute dirty at launch time (all deps are done) */
-            bool texists = false;
-            long long tm = file_mtime_ns(t->name, &texists);
-            bool dirty = t->phony || !texists;
-            if (!dirty) {
-                for (int j = 0; j < t->ndeps; j++) {
-                    Target *d = t->dep_targets[j];
-                    if (d) {
-                        if (d->dirty) { dirty = true; break; }
-                        bool dexists = false;
-                        long long dm = file_mtime_ns(d->name, &dexists);
-                        if (!dexists) { dirty = true; break; }
-                        if (dm > tm) { dirty = true; break; }
-                    } else {
-                        bool sexists = false;
-                        long long sm = file_mtime_ns(t->deps[j], &sexists);
-                        if (!sexists) die("no rule to make target '%s', needed by '%s'", t->deps[j], t->name);
-                        if (sm > tm) { dirty = true; break; }
+            int hash_result = hash_uptodate_dirty(t);
+            bool dirty;
+            if (hash_result >= 0) {
+                dirty = (hash_result == 1);
+            } else {
+                bool texists = false;
+                long long tm = file_mtime_ns(t->name, &texists);
+                dirty = t->phony || !texists;
+                if (!dirty) {
+                    for (int j = 0; j < t->ndeps; j++) {
+                        Target *d = t->dep_targets[j];
+                        if (d) {
+                            if (d->dirty) { dirty = true; break; }
+                            bool dexists = false;
+                            long long dm = file_mtime_ns(d->name, &dexists);
+                            if (!dexists) { dirty = true; break; }
+                            if (dm > tm) { dirty = true; break; }
+                        } else {
+                            bool sexists = false;
+                            long long sm = file_mtime_ns(t->deps[j], &sexists);
+                            if (!sexists) die("no rule to make target '%s', needed by '%s'", t->deps[j], t->name);
+                            if (sm > tm) { dirty = true; break; }
+                        }
                     }
                 }
             }

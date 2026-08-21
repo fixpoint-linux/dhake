@@ -45,7 +45,7 @@ rebuilding from source needs the toolchain).
 ## Usage
 
 ```
-dhake [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--lock[=FILE]] [target ...]
+dhake [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--lock[=FILE]] [--verify|--check] [--hash-uptodate] [target ...]
 ```
 
 - `-f FILE` — buildfile to evaluate (default: `./Dhakefile.dhall`, else `./build.dhall`)
@@ -54,6 +54,8 @@ dhake [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--lock[=FILE]] [tar
 - `--list` — list targets and exit
 - `--warn-hash-mismatch` — report verified-build hash mismatches as warnings (printing the actual hash) instead of failing; see [Verified builds](#verified-builds)
 - `--lock[=FILE]` — write a lockfile (default: `dhake.lock`, or `FILE` if `=FILE` given) with actual hashes and transitive dependencies after a successful build; see [Lockfile / SBOM](#lockfile--sbom)
+- `--verify` / `--check` — verify all pinned hashes and up-to-dateness without running recipes (CI pre-flight); see [Verified builds](#verified-builds)
+- `--hash-uptodate` / `--content-addressed` — decide up-to-dateness by content hash instead of mtime (content-addressed builds); see [Verified builds](#verified-builds)
 - `target` — build named target(s); default is the buildfile's `default`
 
 Exit codes: `0` success; the failing recipe's exit code on a recipe failure
@@ -260,6 +262,18 @@ commit. `--warn-hash-mismatch` only relaxes *hash* verification — other errors
   (dep or output) mismatches. Phony targets are reported as "always runs" and never
   trigger a nonzero exit by themselves. No lockfile is written in verify mode, and
   no recipes are executed.
+
+- **`--hash-uptodate` / `--content-addressed`** — decide up-to-dateness by content
+  instead of mtime (content-addressed builds). For a non-phony target that pins at
+  least one dep hash (`depsHash`), a pinned source input is considered "changed"
+  only if its current hash differs from its pinned hash — so `touch`-ing a file
+  with unchanged content no longer triggers a spurious rebuild. Targets without a
+  `depsHash` (unverified) and phony targets fall back to the normal mtime check, so
+  this is fully backward compatible. Useful for CI caching where checkout touches
+  files without changing them. Note: because this gating is on *input* hashes, a
+  genuine content change still needs the pinned dep hash updated first (or
+  `--warn-hash-mismatch`) before dhake will rebuild — mirroring normal verified-build
+  behavior.
 
 ### Lockfile / SBOM
 

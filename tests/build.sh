@@ -1084,6 +1084,79 @@ grep -q "needs rebuild" /tmp/dhake-out-v5.txt || { echo "  'needs rebuild' not f
 check "verify-no-recipe-run" "$ok"
 rm -f verify_v5.txt verify_v5_sentinel.txt build_verify_v5.dhall
 
+# ---- Hash-based up-to-date tests ----
+
+# ---- Case H1: hash-uptodate touch-no-rebuild ----
+# Verified target with a depsHash pin; touch dep (mtime bump, content same) -> with --hash-uptodate, no rebuild
+HASH_H1=$(printf 'hello world' | sha256sum | cut -d' ' -f1)
+cat > build_hash_h1.dhall <<BUILDEOF
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, hash : Text, depsHash : List { path : Text, hash : Text } }
+in  { targets = [ { mapKey = "hash_h1.txt", mapValue = { deps = ["src_h1.txt"], phony = False, recipe = [ < Shell = "cp src_h1.txt hash_h1.txt" > ], hash = "sha256:$HASH_H1", depsHash = [ { path = "src_h1.txt", hash = "sha256:$HASH_H1" } ] } } ], default = "hash_h1.txt" }
+BUILDEOF
+
+printf 'hello world' > src_h1.txt
+rm -f hash_h1.txt
+"$BIN" -f build_hash_h1.dhall > /tmp/dhake-out-h1a.txt 2> /tmp/dhake-err-h1a.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f hash_h1.txt ] || { echo "  hash_h1.txt should exist after build"; ok=0; }
+# Now touch the source (mtime changes, content same). Sleep so the mtime gap is
+# clearly larger than the filesystem's timestamp granularity — otherwise the
+# rebuild assertion below could race.
+sleep 1
+touch src_h1.txt
+# With --hash-uptodate, should be up to date (no rebuild)
+"$BIN" -f build_hash_h1.dhall --hash-uptodate > /tmp/dhake-out-h1b.txt 2> /tmp/dhake-err-h1b.txt
+rc=$?
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+grep -q "is up to date" /tmp/dhake-out-h1b.txt || { echo "  'is up to date' not found with --hash-uptodate"; cat /tmp/dhake-out-h1b.txt; ok=0; }
+# Verify recipe did NOT run by checking mtime of hash_h1.txt hasn't changed
+OLD_MTIME=$(stat -c %Y hash_h1.txt)
+sleep 0.1
+"$BIN" -f build_hash_h1.dhall --hash-uptodate > /tmp/dhake-out-h1c.txt 2> /tmp/dhake-err-h1c.txt
+NEW_MTIME=$(stat -c %Y hash_h1.txt)
+[ "$OLD_MTIME" = "$NEW_MTIME" ] || { echo "  hash_h1.txt mtime changed (recipe ran when it shouldn't)"; ok=0; }
+check "hash-uptodate-touch-no-rebuild" "$ok"
+
+# Without --hash-uptodate, same touch SHOULD trigger rebuild (mtime logic)
+"$BIN" -f build_hash_h1.dhall > /tmp/dhake-out-h1d.txt 2> /tmp/dhake-err-h1d.txt
+rc=$?
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+grep -q "building" /tmp/dhake-out-h1d.txt || { echo "  'building' not found without --hash-uptodate (should rebuild)"; cat /tmp/dhake-out-h1d.txt; ok=0; }
+check "hash-uptodate-mtime-still-works" "$ok"
+rm -f hash_h1.txt src_h1.txt build_hash_h1.dhall
+
+# ---- Case H2: hash-uptodate content-change-rebuild ----
+# Same target; actually change src content -> with --hash-uptodate, must rebuild
+HASH_H2_OLD=$(printf 'hello world' | sha256sum | cut -d' ' -f1)
+HASH_H2_NEW=$(printf 'hello changed' | sha256sum | cut -d' ' -f1)
+cat > build_hash_h2.dhall <<BUILDEOF
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, hash : Text, depsHash : List { path : Text, hash : Text } }
+in  { targets = [ { mapKey = "hash_h2.txt", mapValue = { deps = ["src_h2.txt"], phony = False, recipe = [ < Shell = "cp src_h2.txt hash_h2.txt" > ], hash = "sha256:$HASH_H2_OLD", depsHash = [ { path = "src_h2.txt", hash = "sha256:$HASH_H2_OLD" } ] } } ], default = "hash_h2.txt" }
+BUILDEOF
+
+printf 'hello world' > src_h2.txt
+rm -f hash_h2.txt
+"$BIN" -f build_hash_h2.dhall > /tmp/dhake-out-h2a.txt 2> /tmp/dhake-err-h2a.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f hash_h2.txt ] || { echo "  hash_h2.txt should exist after build"; ok=0; }
+# Change the source content
+printf 'hello changed' > src_h2.txt
+# With --hash-uptodate, should rebuild (hash differs). Add --warn-hash-mismatch so
+# the post-build output-hash verification (pin is still the OLD content) downgrades
+# to a warning instead of failing the rebuild we are deliberately triggering.
+"$BIN" -f build_hash_h2.dhall --hash-uptodate --warn-hash-mismatch > /tmp/dhake-out-h2b.txt 2> /tmp/dhake-err-h2b.txt
+rc=$?
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+grep -q "building" /tmp/dhake-out-h2b.txt || { echo "  'building' not found with --hash-uptodate (should rebuild on content change)"; cat /tmp/dhake-out-h2b.txt; ok=0; }
+check "hash-uptodate-content-change-rebuild" "$ok"
+rm -f hash_h2.txt src_h2.txt build_hash_h2.dhall
+
 rm -f netprobe.c netprobe build_denyNetwork.dhall build_denyNetwork_unix.dhall build_no_denyNetwork.dhall build_denyNetwork_failclosed.dhall
 
 echo

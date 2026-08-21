@@ -83,7 +83,7 @@ let Target = { deps : List Text, phony : Bool, recipe : List Action
              }
 in  { targets = List { mapKey : Text, mapValue : Target }
     , default : Text
-    , sandbox : Optional { enable : Bool, readExec : Bool, unveil : List Text }
+    , sandbox : Optional { enable : Bool, readExec : Bool, denyNetwork : Bool, unveil : List Text }
     }
 ```
 
@@ -138,6 +138,8 @@ dhake can run each recipe in a [Linux Landlock](https://www.kernel.org/doc/html/
 in  { targets = ...
     , default = "dhake.com"
     , sandbox = { enable = True
+                , readExec = True
+                , denyNetwork = True
                 , unveil = [ "rwc:~/.npm", "rwc:~/.cache", "rwc:~/.elm" ]
                 }
     }
@@ -146,6 +148,8 @@ in  { targets = ...
 **Model.** By default (write containment), the ruleset handles **only the WRITE-class rights** (write/create/remove/rename). READ and EXECUTE are deliberately left unrestricted, so recipes can still exec any tool (the shell, `cc`, `node`, …) and read any file — but a rogue or buggy recipe **cannot write outside the unveiled directories**. Landlock has no `chmod`/`chown` right, so those still work.
 
 When `sandbox.readExec = True`, READ_FILE, READ_DIR, and EXECUTE are also handled. In this mode, recipes **cannot read or execute outside the unveiled directories** — but the standard toolchain directories (`/usr/bin`, `/usr/lib`, `/usr/include`, etc.) are **auto-unveiled** with appropriate permissions so builds can still compile and run programs. A rogue recipe cannot read `/etc/passwd` or scan home directories.
+
+When `sandbox.denyNetwork = True`, a seccomp BPF filter is installed that **denies socket creation for network address families** (AF_INET, AF_INET6, AF_PACKET, AF_NETLINK) with EPERM, while still allowing AF_UNIX/AF_LOCAL sockets. This prevents network egress (a rogue recipe cannot phone home or pull dependencies). The filter is applied per-recipe-child and fails closed if seccomp cannot be established. *Caveats:* it blocks *creation* of network sockets only — an already-open network fd inherited across fork would still be usable, but dhake itself opens no network sockets, so none are inherited by recipe children. Exotic non-IP families (AF_BLUETOOTH, AF_CAN, AF_VSOCK, AF_XDP) are not denied, but none enable standard internet egress.
 
 **What is unveiled automatically.** The build directory (cwd), `/tmp`, `$TMPDIR`, and `/dev/{null,zero,full,tty}` — all read-write-execute (cwd and /tmp get EXECUTE so outputs can be run). When `readExec = True`, the standard toolchain directories are also auto-unveiled: bin dirs (`/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`, `/usr/local/bin`) with READ+EXECUTE; lib dirs (`/usr/lib`, `/lib`, `/usr/lib64`, `/lib64`, `/usr/local/lib`) with READ+EXECUTE; include dirs (`/usr/include`, `/usr/local/include`) with READ only.
 
@@ -156,6 +160,7 @@ When `sandbox.readExec = True`, READ_FILE, READ_DIR, and EXECUTE are also handle
 **Fallback.** If landlock is unavailable (kernel < 5.13 or non-Linux), dhake's behavior depends on the mode:
 - **write-containment (`readExec = False`, default):** prints a single warning (`landlock sandbox unavailable`) and runs the build **unsandboxed**, so the same buildfile works everywhere (e.g. in a CI sandbox that blocks the landlock syscall).
 - **`readExec = True`:** **fails closed** — dhake aborts the build with a clear error rather than running recipes unsandboxed. Because `readExec` explicitly requests read/execute containment, silently skipping it would defeat the security guarantee. Disable `readExec` (or run on a landlock-capable host) to proceed.
+- **`denyNetwork = True`:** **fails closed** — if seccomp cannot be established (unsupported architecture or kernel), dhake aborts the recipe child with exit code 3 rather than running with network access. Because `denyNetwork` explicitly requests network containment, silently skipping it would defeat the security guarantee.
 
 ### Shell recipes
 

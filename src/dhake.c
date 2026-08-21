@@ -22,6 +22,7 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
@@ -29,6 +30,14 @@
 #include <fcntl.h>
 #include <sys/prctl.h>
 #include <libc/calls/landlock.h>
+#include <libc/calls/struct/bpf.internal.h>
+#include <libc/calls/struct/seccomp.internal.h>
+#include <libc/calls/struct/filter.internal.h>
+#include <libc/sysv/consts/audit.h>
+#include <stddef.h>
+#include <sys/auxv.h>
+
+extern const int __NR_socket;
 
 /* ------------------------------------------------------------------ */
 /* In-memory build plan                                                */
@@ -90,6 +99,7 @@ typedef struct {
     /* landlock sandbox config (from optional top-level `sandbox` field) */
     bool sandbox_enabled;
     bool sandbox_read_exec; /* when true, also handle READ_FILE|READ_DIR|EXECUTE */
+    bool sandbox_deny_network; /* when true, deny network socket creation via seccomp */
     char **unveil;         /* global "perms:path" whitelist entries */
     int nunveil;
     int landlock_abi;      /* probe result; <1 => unavailable */
@@ -550,13 +560,16 @@ static Build *build_plan(Term *root) {
     Term *default_t = rec_get(root, "default");
     if (default_t) b->default_name = term_text_cstr(default_t);
 
-    /* optional sandbox config: { enable : Bool, readExec : Bool, unveil : List Text } */
+    /* optional sandbox config: { enable : Bool, readExec : Bool, denyNetwork : Bool, unveil : List Text } */
     Term *sb = rec_get(root, "sandbox");
     if (sb) {
-        if (sb->tag != TmRecordLit) die("buildfile: 'sandbox' must be a record { enable, readExec, unveil }");
+        if (sb->tag != TmRecordLit) die("buildfile: 'sandbox' must be a record { enable, readExec, denyNetwork, unveil }");
         b->sandbox_enabled = rec_bool(sb, "enable", false, "buildfile");
         b->sandbox_read_exec = rec_bool(sb, "readExec", false, "buildfile");
+        b->sandbox_deny_network = rec_bool(sb, "denyNetwork", false, "buildfile");
         b->unveil = parse_unveil_list(sb, "buildfile", &b->nunveil);
+        if (b->sandbox_deny_network && !b->sandbox_enabled)
+            fprintf(stderr, "dhake: warning: sandbox.denyNetwork=True but sandbox.enable=False; network containment will NOT be applied\n");
     }
 
     Term *targets = rec_get(root, "targets");
@@ -877,6 +890,84 @@ static void landlock_auto_read_exec(int rfd) {
  * when readExec=True the user has EXPLICITLY opted into read/execute
  * containment; running unsandboxed would silently defeat that guarantee, so
  * we fail CLOSED: abort the recipe child with a clear error. */
+
+/* seccomp BPF filter to deny network socket creation.
+ * Denies socket() for AF_INET/AF_INET6/AF_PACKET/AF_NETLINK (EPERM),
+ * allows AF_UNIX/AF_LOCAL and everything else.
+ * Returns 0 on success, -1 on failure. */
+static int seccomp_deny_network(void) {
+    /* Test hook: force the fail-closed path (simulate seccomp being
+     * unavailable) so tests can deterministically exercise the _exit(3)
+     * branch regardless of host seccomp support. */
+    if (getenv("DHAKE_FORCE_NO_SECCOMP")) return -1;
+
+    /* Runtime arch gate: only x86_64 and aarch64 are supported */
+    const char *platform = (const char *)getauxval(AT_PLATFORM);
+    if (!platform || (strcmp(platform, "x86_64") != 0 && strcmp(platform, "aarch64") != 0)) {
+        return -1;
+    }
+
+    /* 13-instruction BPF filter: denies socket() for AF_INET/AF_INET6/AF_PACKET/AF_NETLINK
+     * (returns EPERM), allows AF_UNIX/AF_LOCAL and all other syscalls.
+     *
+     * Classic-BPF jump offsets are relative to the NEXT instruction:
+     * true  -> pc += jt ; false -> pc += jf.  Layout (0-12):
+     * 0:  LD arch
+     * 1:  JEQ x86_64   jt=2 jf=0   x86 -> 4 ; else -> 2
+     * 2:  JEQ aarch64  jt=1 jf=0   arm -> 4 ; else -> 3
+     * 3:  RET KILL (unrecognized arch)
+     * 4:  LD syscall nr
+     * 5:  JEQ __NR_socket jt=0 jf=5  socket -> 6 ; else -> 11 (ALLOW)
+     * 6:  LD args[0] (domain)
+     * 7:  JEQ AF_INET   jt=4 jf=0   -> 12 (deny) ; else -> 8
+     * 8:  JEQ AF_INET6  jt=3 jf=0   -> 12 (deny) ; else -> 9
+     * 9:  JEQ AF_PACKET jt=2 jf=0   -> 12 (deny) ; else -> 10
+     * 10: JEQ AF_NETLINK jt=1 jf=0  -> 12 (deny) ; else -> 11
+     * 11: RET ALLOW (AF_UNIX/AF_LOCAL and other domains)
+     * 12: RET ERRNO|EPERM (denied network domains)
+     */
+    struct sock_filter filter[] = {
+        /* Load architecture */
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
+        /* x86_64: if equal, skip past aarch64 check + kill to LD nr (instr 4) */
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 2, 0),
+        /* aarch64: if equal, skip past kill to LD nr (instr 4) */
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_AARCH64, 1, 0),
+        /* Kill other architectures */
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL),
+        /* Load syscall number */
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        /* If not socket, skip to ALLOW (instr 11); if socket, fall through to domain check */
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_socket, 0, 5),
+        /* Load first arg (domain) */
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
+        /* Check AF_INET: if equal, skip to deny (instr 12); else go to next */
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AF_INET, 4, 0),
+        /* Check AF_INET6: if equal, skip to deny (instr 12); else go to next */
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AF_INET6, 3, 0),
+        /* Check AF_PACKET: if equal, skip to deny (instr 12); else go to next */
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AF_PACKET, 2, 0),
+        /* Check AF_NETLINK: if equal, skip to deny (instr 12); else go to next (allow) */
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AF_NETLINK, 1, 0),
+        /* Allow AF_UNIX/AF_LOCAL and any other domain */
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        /* Deny network socket domains */
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+    };
+    struct sock_fprog prog = {
+        .len = (unsigned short)(sizeof filter / sizeof filter[0]),
+        .filter = filter,
+    };
+
+    /* Set NO_NEW_PRIVS (idempotent; may already be set by landlock) */
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return -1;
+
+    /* Install the seccomp filter */
+    if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) return -1;
+
+    return 0;
+}
+
 static void sandbox_fail(Build *b, const char *why) {
     fprintf(stderr, "dhake: %s: landlock sandbox unavailable (requested): %s\n",
             b->sandbox_read_exec ? "error" : "warning", why);
@@ -889,6 +980,10 @@ static void sandbox_fail(Build *b, const char *why) {
 
 static void sandbox_child(Build *b, Target *t) {
     if (!b->sandbox_enabled) return;
+    if (b->sandbox_deny_network && seccomp_deny_network() != 0) {
+        fprintf(stderr, "dhake: error: denyNetwork=True requested network containment but seccomp could not be established; aborting to avoid running unsandboxed\n");
+        _exit(3);
+    }
     if (b->landlock_abi < 1) { sandbox_fail(b, "landlock unsupported by kernel"); return; }
 
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) { sandbox_fail(b, strerror(errno)); return; }

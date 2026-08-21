@@ -283,7 +283,7 @@ featuresSection =
                     }
                 , Fixpoint.Card.view
                     { n = "08"
-                    , title = "Sandboxing (Landlock)"
+                    , title = "Sandboxing (Landlock + seccomp)"
                     , body =
                         [ text "Opt-in write-containment by default — recipes can only write under the build tree, "
                         , Fixpoint.Code.inline "/tmp"
@@ -291,7 +291,9 @@ featuresSection =
                         , Fixpoint.Code.inline "unveil"
                         , text " whitelist. Set "
                         , Fixpoint.Code.inline "readExec"
-                        , text " to also restrict reads and execs to the toolchain. A rogue recipe can’t touch the rest of your disk."
+                        , text " to also restrict reads and execs to the toolchain. Set "
+                        , Fixpoint.Code.inline "denyNetwork"
+                        , text " to block network socket creation via seccomp. A rogue recipe can't touch the rest of your disk or phone home."
                         ]
                     }
                 , Fixpoint.Card.view
@@ -371,6 +373,8 @@ exampleCodeBlock =
     , text "  { sandbox = { enable = "
     , Fixpoint.Code.g "True"
     , text ", readExec = "
+    , Fixpoint.Code.g "True"
+    , text ", denyNetwork = "
     , Fixpoint.Code.g "True"
     , text ", unveil = [ "
     , Fixpoint.Code.g "\"rwc:~/.cache\""

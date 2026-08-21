@@ -11,21 +11,25 @@
 -- builds dhake.  The committed dhake.com is the bootstrap that builds the
 -- first copy from source.
 --
--- ─── optional landlock sandbox ────────────────────────────────────────────
--- Add a top-level `sandbox = { enable, readExec, unveil }` field to run each
--- recipe in a Landlock sandbox (see README "Sandboxing (Landlock)"):
+-- ─── optional landlock sandbox + seccomp network deny ────────────────────
+-- Add a top-level `sandbox = { enable, readExec, denyNetwork, unveil }` field to run
+-- each recipe in a Landlock sandbox (see README "Sandboxing (Landlock)"):
 --
 --     , sandbox = { enable = True
 --                 , readExec = True    -- optional: also restrict READ/EXECUTE
+--                 , denyNetwork = True -- optional: deny network socket creation
 --                 , unveil = [ "rwc:~/.npm", "rwc:~/.cache", "rwc:~/.elm" ]
 --                 }
 --
 -- unveil entries are "perms:path" (default rwc). When readExec=False (default),
 -- w/c are enforced (write/create/remove) and r/x are parsed but inert. When
 -- readExec=True, r/x are also enforced (READ_FILE|READ_DIR and EXECUTE), and
--- standard toolchain dirs are auto-unveiled. A leading ~ expands to $HOME.
+-- standard toolchain dirs are auto-unveiled. When denyNetwork=True, a seccomp
+-- BPF filter denies socket() for AF_INET/AF_INET6/AF_PACKET/AF_NETLINK (EPERM),
+-- allowing only AF_UNIX/AF_LOCAL. A leading ~ expands to $HOME.
 -- If landlock is unavailable (older kernel / non-Linux), dhake warns once and
--- runs unsandboxed, so builds keep working everywhere.
+-- runs unsandboxed, so builds keep working everywhere. If seccomp is unavailable
+-- and denyNetwork=True, the recipe child fails closed (exit 3).
 -- ──────────────────────────────────────────────────────────────────────────
 
 let Action =
@@ -126,11 +130,11 @@ in  { targets =
               { deps = [ "src/dhake.c" ] # core
               , phony = False
               -- expected hash of the produced dhake.com (verified after build)
-              , hash = "sha256:e2c5cfe13fad15ae905b8f31929a7b516b12e31f51535fc6a8ff7de94b3bb8ae"
+              , hash = "sha256:110576efad85dfad3911623d089ed4f9c640da05640f9b0144039d8a45c94e57"
               -- expected hash of each source dep (verified before build)
               , depsHash =
                   [ { path = "src/dhake.c"
-                    , hash = "sha256:92f45480a1e405562f7160e8b80b839be5747f5bcd518c8fa369424fc5dea6a4"
+                    , hash = "sha256:016de3a5bb542d3ebbeae2a866532ef9f632b178e4d9ba2732b89f1b97ad570f"
                     }
                   ] # coreHashes
               , recipe =

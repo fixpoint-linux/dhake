@@ -1157,6 +1157,74 @@ grep -q "building" /tmp/dhake-out-h2b.txt || { echo "  'building' not found with
 check "hash-uptodate-content-change-rebuild" "$ok"
 rm -f hash_h2.txt src_h2.txt build_hash_h2.dhall
 
+# ---- Case: watch-rebuild-on-change ----
+# Test that --watch mode rebuilds when a source file changes
+write_file watch_src.txt 'v1'
+cat > build_watch.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets = [ { mapKey = "watch_out.txt", mapValue = { deps = ["watch_src.txt"], phony = False, recipe = [ < Shell = "cat watch_src.txt > watch_out.txt" > ] } } ], default = "watch_out.txt" }
+BUILDEOF
+
+# Start dhake in watch mode in background
+"$BIN" -f build_watch.dhall --watch > /tmp/dhake-watch-log.txt 2>&1 &
+WPID=$!
+
+# Wait for the "watching" steady-state line (up to 10s, 0.1s polls)
+watch_ready=0
+for i in $(seq 1 100); do
+    if grep -q "watching.*file.*for changes" /tmp/dhake-watch-log.txt; then
+        watch_ready=1
+        break
+    fi
+    sleep 0.1
+done
+
+ok=1
+if [ "$watch_ready" -ne 1 ]; then
+    echo "  'watching' line not found in log after 10s"
+    cat /tmp/dhake-watch-log.txt
+    ok=0
+fi
+
+# Modify the source file
+printf 'v2\n' > watch_src.txt
+
+# Wait for rebuild (poll up to 10s for >= 2 "building" lines)
+rebuild_count=0
+for i in $(seq 1 100); do
+    count=$(grep -c "building" /tmp/dhake-watch-log.txt || true)
+    if [ "$count" -ge 2 ]; then
+        rebuild_count=1
+        break
+    fi
+    sleep 0.1
+done
+
+if [ "$rebuild_count" -ne 1 ]; then
+    echo "  rebuild not detected (building count < 2)"
+    count=$(grep -c "building" /tmp/dhake-watch-log.txt || true)
+    echo "  building count: $count"
+    cat /tmp/dhake-watch-log.txt
+    ok=0
+fi
+
+# Check output file has v2
+if [ "$ok" -eq 1 ]; then
+    if ! grep -q "v2" watch_out.txt; then
+        echo "  watch_out.txt does not contain v2"
+        cat watch_out.txt
+        ok=0
+    fi
+fi
+
+# Always clean up the watcher
+kill $WPID 2>/dev/null || true
+wait $WPID 2>/dev/null || true
+
+check "watch-rebuild-on-change" "$ok"
+rm -f watch_src.txt watch_out.txt build_watch.dhall
+
 rm -f netprobe.c netprobe build_denyNetwork.dhall build_denyNetwork_unix.dhall build_no_denyNetwork.dhall build_denyNetwork_failclosed.dhall
 
 echo

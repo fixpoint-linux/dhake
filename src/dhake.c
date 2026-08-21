@@ -34,10 +34,20 @@
 #include <libc/calls/struct/seccomp.internal.h>
 #include <libc/calls/struct/filter.internal.h>
 #include <libc/sysv/consts/audit.h>
+#include <libc/sysv/consts/in.h>
 #include <stddef.h>
 #include <sys/auxv.h>
+#include <stdint.h>
 
 extern const int __NR_socket;
+
+/* Cosmopolitan libc exports raw inotify syscall wrappers (sys_inotify_*), but
+ * no public header declares them, so declare them here. They return the fd/wd
+ * on success and a NEGATIVE errno on failure (raw-syscall convention), NOT -1
+ * with errno set. (The generic `syscall()` is NOT usable here — it uses cosmo's
+ * internal syscall numbering, not raw Linux numbers, so it returns ENOSYS.) */
+extern long sys_inotify_init1(int flags);
+extern long sys_inotify_add_watch(int fd, const char *path, uint32_t mask);
 
 /* ------------------------------------------------------------------ */
 /* In-memory build plan                                                */
@@ -346,6 +356,9 @@ static bool want_verify = false;
 /* When --hash-uptodate / --content-addressed is given, use content hashing
  * instead of mtime comparison for verified targets (those pinning a depsHash). */
 static bool hash_uptodate = false;
+
+/* When --watch is given, watch source files and rebuild on changes. */
+static bool watch_mode = false;
 
 /* Human-readable name of a hash algorithm, for building "<algo>:<hex>" specs. */
 static const char *hash_algo_name(HashAlg alg) {
@@ -1402,6 +1415,209 @@ static char **collect_transitive_deps(Build *b, Target *t, int *n_out) {
     return result;
 }
 
+/* ------------------------------------------------------------------ */
+/* inotify-based file watching for --watch mode                              */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    int wd;
+    uint32_t mask;
+    uint32_t cookie;
+    uint32_t len;
+    char name[];
+} WatchEvent;
+
+typedef struct WatchDir {
+    int wd;
+    char *dir;
+    char **files;
+    int nfiles;
+} WatchDir;
+
+/* Return basename of a path (pointer into the original string). */
+static const char *base_name(const char *path) {
+    const char *p = strrchr(path, '/');
+    return p ? p + 1 : path;
+}
+
+/* Return directory name of a path (malloc'd; caller must free). */
+static char *dir_name(const char *path) {
+    const char *p = strrchr(path, '/');
+    if (!p) return strdup(".");
+    if (p == path) return strdup("/");
+    char *dir = malloc((size_t)(p - path + 1));
+    if (!dir) return NULL;
+    memcpy(dir, path, (size_t)(p - path));
+    dir[p - path] = '\0';
+    return dir;
+}
+
+/* Collect all source-file dependencies + buildfile for watching.
+ * Returns a NULL-terminated array of file paths (malloc'd). */
+static char **collect_watch_files(Build *b, const char *buildfile, int *n_out) {
+    /* Count: worst case = all deps of all targets + buildfile */
+    int count = 0;
+    for (Target *t = b->targets; t; t = t->next) {
+        if (t->state != 1) continue;  /* only the requested subgraph */
+        for (int j = 0; j < t->ndeps; j++) {
+            if (t->dep_targets[j] == NULL) count++; /* source file */
+        }
+    }
+    count++; /* buildfile */
+
+    char **result = malloc((size_t)(count + 1) * sizeof(char *));
+    if (!result) die("out of memory");
+    int n = 0;
+
+    /* Add buildfile first */
+    result[n++] = (char *)buildfile;
+
+    /* Add source-file deps (dep_targets[j] == NULL means it's a source file path) */
+    for (Target *t = b->targets; t; t = t->next) {
+        if (t->state != 1) continue;  /* only the requested subgraph */
+        for (int j = 0; j < t->ndeps; j++) {
+            if (t->dep_targets[j] == NULL) {
+                const char *dep = t->deps[j];
+                /* Dedupe: check if already in result */
+                bool found = false;
+                for (int k = 0; k < n; k++) {
+                    if (!strcmp(result[k], dep)) { found = true; break; }
+                }
+                if (!found) {
+                    result[n++] = (char *)dep;
+                }
+            }
+        }
+    }
+
+    result[n] = NULL;
+    *n_out = n;
+    return result;
+}
+
+/* Set up inotify watches on parent directories of the given files.
+ * Returns the inotify fd, or -1 on error. dirs_out and ndirs_out are set to
+ * the array of WatchDir structs (caller must free). */
+static int setup_watch(char **files, int nfiles, WatchDir **dirs_out, int *ndirs_out) {
+    long lfd = sys_inotify_init1(0);
+    if (lfd < 0) { errno = (int)(-lfd); return -1; }
+    int ifd = (int)lfd;
+
+    /* Group files by parent directory */
+    WatchDir *dirs = NULL;
+    int ndirs = 0;
+    int dirs_cap = 0;
+
+    for (int i = 0; i < nfiles; i++) {
+        char *dir = dir_name(files[i]);
+        if (!dir) { close(ifd); return -1; }
+
+        /* Check if we already have a watch for this dir */
+        int found = -1;
+        for (int j = 0; j < ndirs; j++) {
+            if (!strcmp(dirs[j].dir, dir)) { found = j; break; }
+        }
+
+        if (found >= 0) {
+            /* Add file to existing WatchDir */
+            WatchDir *d = &dirs[found];
+            bool already = false;
+            for (int k = 0; k < d->nfiles; k++) {
+                if (!strcmp(d->files[k], base_name(files[i]))) { already = true; break; }
+            }
+            if (!already) {
+                d->files = realloc(d->files, (size_t)(d->nfiles + 1) * sizeof(char *));
+                if (!d->files) { free(dir); close(ifd); return -1; }
+                d->files[d->nfiles++] = (char *)base_name(files[i]);
+            }
+            free(dir);
+        } else {
+            /* Create new WatchDir */
+            if (ndirs == dirs_cap) {
+                dirs_cap = dirs_cap ? dirs_cap * 2 : 4;
+                dirs = realloc(dirs, (size_t)dirs_cap * sizeof(WatchDir));
+                if (!dirs) { free(dir); close(ifd); return -1; }
+            }
+            WatchDir *d = &dirs[ndirs++];
+            d->dir = dir;
+            d->wd = -1;
+            d->nfiles = 0;
+            d->files = NULL;
+
+            /* Add the file basename */
+            d->files = malloc(sizeof(char *));
+            if (!d->files) { close(ifd); return -1; }
+            d->files[d->nfiles++] = (char *)base_name(files[i]);
+
+            /* Add inotify watch on this directory */
+            uint32_t mask = IN_CLOSE_WRITE | IN_MOVED_TO | IN_MODIFY | IN_CREATE | IN_DELETE;
+            long lwd = sys_inotify_add_watch(ifd, dir, mask);
+            if (lwd < 0) {
+                int lerr = (int)(-lwd);
+                if (lerr == ENOENT) {
+                    /* Dir may not exist yet (e.g. a generated-source dir the
+                     * build creates). Skip it rather than killing the whole
+                     * dev-loop; its changes just won't be seen until dhake
+                     * re-arms after the next rebuild. */
+                    fprintf(stderr, "dhake: --watch: warning: cannot watch '%s' (dir missing); changes there won't trigger a rebuild\n", dir);
+                    d->wd = -1; /* never matches; harmless */
+                    continue;
+                }
+                errno = lerr;
+                close(ifd);
+                return -1;
+            }
+            d->wd = (int)lwd;
+        }
+    }
+
+    *dirs_out = dirs;
+    *ndirs_out = ndirs;
+    return ifd;
+}
+
+/* Wait for a change in any watched file. Returns 1 if a watched file changed,
+ * -1 on error, 0 on EOF. */
+static int wait_for_change(int ifd, WatchDir *dirs, int ndirs) {
+    char buf[4096];
+    while (1) {
+        ssize_t n = read(ifd, buf, sizeof(buf));
+        if (n <= 0) {
+            if (n == 0) return 0; /* EOF */
+            if (errno == EINTR) continue;
+            return -1;
+        }
+
+        /* Process all events in the buffer */
+        char *p = buf;
+        char *end = buf + n;
+        while (p < end) {
+            WatchEvent *ev = (WatchEvent *)p;
+
+            /* Check if this is a valid event with a filename */
+            if (ev->len > 0) {
+                /* The kernel NUL-terminates the name and ev->len includes the
+                 * terminator, so filename[ev->len-1] == '\0'. Never write past
+                 * the buffer: writing filename[ev->len] is a 1-byte OOB when the
+                 * event ends exactly at the 4096-byte read boundary. */
+                char *filename = p + sizeof(WatchEvent);
+                if ((size_t)(end - filename) < (size_t)ev->len) break; /* truncated event */
+                for (int i = 0; i < ndirs; i++) {
+                    if (dirs[i].wd == ev->wd) {
+                        for (int j = 0; j < dirs[i].nfiles; j++) {
+                            if (!strcmp(filename, dirs[i].files[j])) return 1; /* matched */
+                        }
+                        break;
+                    }
+                }
+            }
+
+            /* Advance to next event */
+            p += sizeof(WatchEvent) + ev->len;
+        }
+    }
+}
+
 /* Write lockfile JSON to path. Only called on successful build (failed==0). */
 static void write_lockfile(Build *b, const char *path) {
     FILE *f = fopen(path, "w");
@@ -1580,7 +1796,7 @@ static int run_verify(Target **order, int n) {
 static void usage(const char *argv0) {
     printf("dhake — a Make-like build tool driven by a Dhall buildfile\n\n");
     printf("Usage:\n");
-    printf("  %s [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--verify|--check] [--lock[=FILE]] [--hash-uptodate|--content-addressed] [target ...]\n", argv0);
+    printf("  %s [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--verify|--check] [--lock[=FILE]] [--hash-uptodate|--content-addressed] [--watch|-w] [target ...]\n", argv0);
     printf("  %s -h | --help\n\n", argv0);
     printf("Options:\n");
     printf("  -f FILE    buildfile to evaluate (default: ./Dhakefile.dhall, else ./build.dhall)\n");
@@ -1602,6 +1818,9 @@ static void usage(const char *argv0) {
     printf("             unchanged files); a content change still requires re-pinning the\n");
     printf("             dep hash (or --warn-hash-mismatch) before it can rebuild; only\n");
     printf("             affects verified targets, others use mtime\n");
+    printf("  --watch / -w\n");
+    printf("             rebuild and watch the requested targets' source-file dependencies;\n");
+    printf("             on any change, rebuild (dev-loop); uses Linux inotify\n");
     printf("  target     build the named target(s); default: the buildfile's 'default'\n");
 }
 
@@ -1628,39 +1847,45 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--lock")) { lock_path = "dhake.lock"; }
         else if (!strncmp(a, "--lock=", 7)) { lock_path = a + 7; }
         else if (!strcmp(a, "--hash-uptodate") || !strcmp(a, "--content-addressed")) { hash_uptodate = true; }
+        else if (!strcmp(a, "--watch") || !strcmp(a, "-w")) { watch_mode = true; }
         else if (a[0] == '-') { die("unknown option '%s'", a); }
         else { if (nwanted == wanted_cap) { wanted_cap = wanted_cap ? wanted_cap * 2 : 4; wanted = realloc(wanted, (size_t)wanted_cap * sizeof(char *)); } wanted[nwanted++] = a; }
     }
 
-    Term *root = eval_buildfile(buildfile);
-    Build *b = build_plan(root);
-
-    /* probe landlock ABI (only when sandboxing is requested) */
-    b->landlock_abi = -1;
-    if (b->sandbox_enabled) {
-        b->landlock_abi = landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
-        if (b->landlock_abi < 1) {
-            const char *why = (b->landlock_abi < 0) ? strerror(errno) : "kernel lacks landlock support";
-            if (b->sandbox_read_exec) {
-                /* readExec explicitly requested read/execute containment; failing
-                 * open would silently defeat it, so fail the whole build here. */
-                fprintf(stderr, "dhake: error: readExec=True requested read/execute containment but landlock is unavailable (%s)\n", why);
-                fprintf(stderr, "dhake: aborting to avoid running recipes unsandboxed; disable readExec or enable landlock\n");
-                exit(3);
-            }
-            landlock_warned = true;
-            fprintf(stderr, "dhake: warning: landlock sandbox unavailable (requested): %s\n", why);
-        }
-    }
-
     if (want_list) {
+        Term *root = eval_buildfile(buildfile);
+        Build *b = build_plan(root);
         for (Target *t = b->targets; t; t = t->next)
             printf("%s%s\n", t->name,
                    (b->default_name && !strcmp(t->name, b->default_name)) ? "  (default)" : "");
         return 0;
     }
 
-    resolve_deps(b);
+    int failed;
+    for (;;) {
+        failed = 0;
+        Term *root = eval_buildfile(buildfile);
+        Build *b = build_plan(root);
+
+        /* probe landlock ABI (only when sandboxing is requested) */
+        b->landlock_abi = -1;
+        if (b->sandbox_enabled) {
+            b->landlock_abi = landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
+            if (b->landlock_abi < 1) {
+                const char *why = (b->landlock_abi < 0) ? strerror(errno) : "kernel lacks landlock support";
+                if (b->sandbox_read_exec) {
+                    /* readExec explicitly requested read/execute containment; failing
+                     * open would silently defeat it, so fail the whole build here. */
+                    fprintf(stderr, "dhake: error: readExec=True requested read/execute containment but landlock is unavailable (%s)\n", why);
+                    fprintf(stderr, "dhake: aborting to avoid running recipes unsandboxed; disable readExec or enable landlock\n");
+                    exit(3);
+                }
+                landlock_warned = true;
+                fprintf(stderr, "dhake: warning: landlock sandbox unavailable (requested): %s\n", why);
+            }
+        }
+
+        resolve_deps(b);
 
     Target **order; int n;
     topo_order(b, &order, &n);
@@ -1739,7 +1964,6 @@ int main(int argc, char **argv) {
         }
     }
 
-    int failed = 0;
     int jobs_running = 0;
 
     /* If dry-run, force sequential (jobs=1) and just print */
@@ -1935,15 +2159,58 @@ int main(int argc, char **argv) {
         }
     }
 
-    free(ready);
-    free(roots);
-    free(order);
-    free((void *)wanted);
+        free(ready);
+        free(roots);
+        free(order);
 
-    /* Write lockfile if requested, only on success, not dry-run, not --list */
-    if (lock_path != NULL && !dry_run && !want_list && failed == 0) {
-        write_lockfile(b, lock_path);
+        /* Write lockfile if requested, only on success, not dry-run, not --list */
+        if (lock_path != NULL && !dry_run && !want_list && failed == 0) {
+            write_lockfile(b, lock_path);
+        }
+
+        /* Watch mode: set up inotify and wait for changes */
+        if (watch_mode) {
+            int nwatch;
+            char **wf = collect_watch_files(b, buildfile, &nwatch);
+            WatchDir *dirs = NULL;
+            int ndirs = 0;
+            int ifd = setup_watch(wf, nwatch, &dirs, &ndirs);
+            if (ifd < 0) {
+                fprintf(stderr, "dhake: --watch requires Linux inotify: %s\n", strerror(errno));
+                free(wf);
+                for (int i = 0; i < ndirs; i++) {
+                    free(dirs[i].dir);
+                    free(dirs[i].files);
+                }
+                free(dirs);
+                break;
+            }
+            printf("dhake: watching %d file(s) for changes (Ctrl-C to quit)\n", nwatch);
+            fflush(stdout);
+            int ch = wait_for_change(ifd, dirs, ndirs);
+            close(ifd);
+            free(wf);
+            for (int i = 0; i < ndirs; i++) {
+                free(dirs[i].dir);
+                free(dirs[i].files);
+            }
+            free(dirs);
+            if (ch == 1) {
+                printf("dhake: change detected, rebuilding...\n");
+                fflush(stdout);
+                continue; /* rebuild */
+            } else {
+                /* watch read failed (error/EOF): report it, don't silently exit 0 */
+                fprintf(stderr, "dhake: --watch: error waiting for changes: %s\n",
+                        strerror(errno ? errno : EIO));
+                failed = 2;
+                break;
+            }
+        }
+
+        break; /* not in watch mode, exit after one build */
     }
 
+    free((void *)wanted);
     return failed;
 }

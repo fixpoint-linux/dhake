@@ -21,6 +21,10 @@ definition gets type checking, imports, and reusable functions, and it *always*
 terminates. The build plan is a plain value you can reason about, not a recipe
 of shell side effects.
 
+With `--watch`, dhake becomes a dev-loop tool: it watches your source-file
+dependencies and automatically rebuilds on any change, turning edit-save-refresh
+into a seamless workflow.
+
 ## Build (self-hosting)
 
 No build system required to build dhake — dhake builds itself:
@@ -45,7 +49,7 @@ rebuilding from source needs the toolchain).
 ## Usage
 
 ```
-dhake [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--lock[=FILE]] [--verify|--check] [--hash-uptodate] [target ...]
+dhake [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--lock[=FILE]] [--verify|--check] [--hash-uptodate] [--watch|-w] [target ...]
 ```
 
 - `-f FILE` — buildfile to evaluate (default: `./Dhakefile.dhall`, else `./build.dhall`)
@@ -56,6 +60,7 @@ dhake [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--lock[=FILE]] [--v
 - `--lock[=FILE]` — write a lockfile (default: `dhake.lock`, or `FILE` if `=FILE` given) with actual hashes and transitive dependencies after a successful build; see [Lockfile / SBOM](#lockfile--sbom)
 - `--verify` / `--check` — verify all pinned hashes and up-to-dateness without running recipes (CI pre-flight); see [Verified builds](#verified-builds)
 - `--hash-uptodate` / `--content-addressed` — decide up-to-dateness by content hash instead of mtime (content-addressed builds); see [Verified builds](#verified-builds)
+- `--watch` / `-w` — rebuild and watch the requested targets' source-file dependencies; on any change, rebuild (dev-loop). Uses Linux inotify; fails with an error message on other platforms.
 - `target` — build named target(s); default is the buildfile's `default`
 
 Exit codes: `0` success; the failing recipe's exit code on a recipe failure

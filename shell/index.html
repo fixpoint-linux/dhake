@@ -5,8 +5,22 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>dhake — a Make-like build tool driven by Dhall</title>
 <meta name="description" content="dhake: a Make-like build tool whose buildfile is a Dhall expression, compiled with cosmocc into a portable APE. Self-hosting.">
+<script type="importmap">
+{
+  "imports": {
+    "@mfe/core": "./vendor/@mfe/core/index.js",
+    "@mfe/framework": "./vendor/@mfe/framework/index.js",
+    "dhake-page": "./shell/mfe/dhake-page.js"
+  }
+}
+</script>
 </head>
 <body>
-<div id="app"><!-- ssg.mjs injects the pre-rendered Elm page here --></div>
+<div id="app" ssr>
+  <div class="fixpoint-root">
+    <div data-mfe="dhake-page"><!-- ssg.mjs injects the pre-rendered dhake page markup here --></div>
+  </div>
+</div>
+<script type="module" src="./shell/shell.js"></script>
 </body>
 </html>

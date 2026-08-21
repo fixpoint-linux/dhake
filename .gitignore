@@ -6,3 +6,6 @@
 node_modules/
 elm-stuff/
 dist/
+
+# mfe-framework dist (built from submodule at deploy time; served here)
+/vendor/@mfe/

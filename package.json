@@ -1,29 +1,29 @@
 {
-  "name": "dhake",
-  "version": "1.0.0",
-  "description": "**dhake** is a Make-like build tool whose buildfile is written in [Dhall](https://dhall-lang.org). It evaluates a `Dhakefile.dhall` with an embedded C Dhall interpreter, maps the normalized value onto a build plan, and executes it — dependency ordering, incremental (mtime) up-to-date checks, phony targets, and typed actions.",
-  "main": "index.js",
-  "directories": {
-    "doc": "dist",
-    "test": "tests"
-  },
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "elm make src/Main.elm --output=dist/elm.js --optimize && node scripts/ssg.mjs"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/fixpoint-linux/dhake.git"
-  },
-  "keywords": [],
-  "type": "commonjs",
-  "bugs": {
-    "url": "https://github.com/fixpoint-linux/dhake/issues"
-  },
-  "homepage": "https://github.com/fixpoint-linux/dhake#readme",
-  "devDependencies": {
-    "elm": "^0.19.2-0",
-    "elm-format": "^0.8.8",
-    "happy-dom": "^20.11.6"
-  }
+    "name": "dhake",
+    "version": "1.0.0",
+    "description": "**dhake** is a Make-like build tool whose buildfile is written in [Dhall](https://dhall-lang.org). It evaluates a `Dhakefile.dhall` with an embedded C Dhall interpreter, maps the normalized value onto a build plan, and executes it \u2014 dependency ordering, incremental (mtime) up-to-date checks, phony targets, and typed actions.",
+    "main": "index.js",
+    "directories": {
+        "doc": "dist",
+        "test": "tests"
+    },
+    "scripts": {
+        "test": "echo \"Error: no test specified\" && exit 1",
+        "build": "(cd mfe-framework && npm ci && npm run build) && rm -rf vendor/@mfe && mkdir -p vendor/@mfe/core vendor/@mfe/framework && cp mfe-framework/packages/core/dist/*.js vendor/@mfe/core/ && cp mfe-framework/packages/framework/dist/*.js vendor/@mfe/framework/ && elm make src/Main.elm --output=dist/elm.js --optimize && node scripts/ssg.mjs"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/fixpoint-linux/dhake.git"
+    },
+    "keywords": [],
+    "type": "commonjs",
+    "bugs": {
+        "url": "https://github.com/fixpoint-linux/dhake/issues"
+    },
+    "homepage": "https://github.com/fixpoint-linux/dhake#readme",
+    "devDependencies": {
+        "elm": "^0.19.2-0",
+        "elm-format": "^0.8.8",
+        "happy-dom": "^20.11.6"
+    }
 }

@@ -16,19 +16,22 @@
  *       a couple of macrotask ticks for the initial render to flush, and reads
  *       back `node.innerHTML` — the pre-rendered docs markup, including the
  *       `<style>` node emitted by `Fixpoint.Style.stylesheet`.
- *   4.  Reads `shell/index.html` (the document skeleton: `<head>` with title +
- *       description + an empty `#app` slot), injects the rendered markup into
- *       the slot, and writes the final `dist/index.html`.
+ *   4.  Reads `shell/index.html` (the MFE shell: `<head>` with title +
+ *       description + import map, and the `#app` root with an `ssr` attribute),
+ *       injects the rendered markup into its `[data-mfe="dhake-page"]` slot,
+ *       and writes the final `dist/index.html`.
  *
- * The output page is fully static — all styling ships inline in the rendered
- * markup and there is no client-side JS, so GitHub Pages can just serve the
- * file (it uploads `dist/`).
+ * The output page ships with content already present (no-JS / SEO) and all
+ * styling inline (the rendered markup carries the `<style>` emitted by
+ * `Fixpoint.Style.stylesheet`). Client-side, the shell's `ssr` rehydration
+ * lets the `dhake-page` MFE take over the pre-rendered DOM — see
+ * `shell/mfe/dhake-page.js`.
  *
  * Run from the repo root:
  *   node scripts/ssg.mjs
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, cpSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { Window } from 'happy-dom';
@@ -40,7 +43,7 @@ const ELM_BUNDLE = join(DIST, 'elm.js');
 const SHELL_TEMPLATE = join(ROOT, 'shell', 'index.html');
 const OUTPUT = join(DIST, 'index.html');
 
-const SLOT_SELECTOR = '#app';
+const SLOT_SELECTOR = '[data-mfe="dhake-page"]';
 
 function log(msg) {
   console.log(`[ssg] ${msg}`);
@@ -136,8 +139,8 @@ async function renderPage(window) {
 }
 
 /**
- * Inject the pre-rendered docs markup into the shell template's `#app` slot
- * and return the final, complete HTML document.
+ * Inject the pre-rendered docs markup into the shell template's
+ * `[data-mfe="dhake-page"]` slot and return the final, complete HTML document.
  */
 function injectRendered(shellHtml, rendered) {
   const win = new Window();
@@ -177,6 +180,15 @@ async function main() {
 
   mkdirSync(DIST, { recursive: true });
   writeFileSync(OUTPUT, finalHtml);
+
+  // Assemble a self-contained GitHub Pages root in dist/. The shell references
+  // absolute /shell/... and /vendor/@mfe/... paths, and the MFE module fetches
+  // /dist/elm.js — all of these must resolve relative to the Pages site root,
+  // so copy shell/ and vendor/ (built by the package.json build script) into
+  // dist/ alongside index.html + dist/elm.js.
+  cpSync(join(ROOT, 'shell'), join(DIST, 'shell'), { recursive: true });
+  cpSync(join(ROOT, 'vendor', '@mfe'), join(DIST, 'vendor', '@mfe'), { recursive: true });
+
   log(`wrote ${OUTPUT} (${finalHtml.length} bytes)`);
 }
 

@@ -34,7 +34,7 @@ import Fixpoint.Nav
 import Fixpoint.Section
 import Fixpoint.Style
 import Html exposing (Html, a, b, div, em, p, span, text)
-import Html.Attributes exposing (class, href)
+import Html.Attributes exposing (attribute, class, href)
 
 
 main : Program () Model Msg
@@ -105,7 +105,8 @@ navView =
                 , text "://dhake"
                 ]
         , links =
-            [ Fixpoint.Nav.homeLink "/fixpoint-linux" "fixpoint-linux"
+            [ a [ class "home", href "https://fixpointlinux.org/", attribute "data-mfe-route" "/fixpoint-linux" ]
+                [ text "fixpoint-linux" ]
             , Fixpoint.Nav.link "#build" "build"
             , Fixpoint.Nav.link "#features" "features"
             , Fixpoint.Nav.link "#example" "example"

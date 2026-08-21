@@ -1553,6 +1553,121 @@ grep -q "chdir.*failed" /tmp/dhake-err-c3.txt || { echo "  chdir error message n
 check "cwd-chdir-fail" "$ok"
 rm -f build_cwd_fail.dhall
 
+# ---- Case A1: arch-env: DHAKE_ARCH env var available in recipe ----
+cat > build_arch_env.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets = [ { mapKey = "arch-env", mapValue = { deps = [] : List Text, phony = False, recipe = [ < Shell = "echo $DHAKE_ARCH > arch.txt" > ] } } ], default = "arch-env" }
+BUILDEOF
+
+"$BIN" -f build_arch_env.dhall --arch=x86_64 > /tmp/dhake-out-a1.txt 2> /tmp/dhake-err-a1.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f arch.txt ] || { echo "  arch.txt not created"; ok=0; }
+grep -q 'x86_64' arch.txt || { echo "  arch.txt does not contain x86_64"; ok=0; }
+check "arch-env" "$ok"
+rm -f build_arch_env.dhall arch.txt
+
+# ---- Case A2: arch-filter-skip: targets filtered by arch field ----
+cat > build_arch_filter.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, arch : Text }
+in  { targets = [ { mapKey = "native", mapValue = { deps = [] : List Text, phony = False, recipe = [ < Shell = "touch native.out" > ], arch = "x86_64" } }, { mapKey = "arm", mapValue = { deps = [] : List Text, phony = False, recipe = [ < Shell = "touch arm.out" > ], arch = "aarch64" } } ], default = "native" }
+BUILDEOF
+
+# Build with --arch=x86_64: should build native.out, NOT arm.out
+"$BIN" -f build_arch_filter.dhall --arch=x86_64 > /tmp/dhake-out-a2.txt 2> /tmp/dhake-err-a2.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f native.out ] || { echo "  native.out not created"; ok=0; }
+[ ! -f arm.out ] || { echo "  arm.out should NOT have been created"; ok=0; }
+check "arch-filter-skip-x86" "$ok"
+rm -f native.out
+
+# Build with --arch=aarch64 and explicit target arm: should build arm.out
+"$BIN" -f build_arch_filter.dhall --arch=aarch64 arm > /tmp/dhake-out-a2b.txt 2> /tmp/dhake-err-a2b.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f arm.out ] || { echo "  arm.out not created"; ok=0; }
+[ ! -f native.out ] || { echo "  native.out should NOT have been created"; ok=0; }
+check "arch-filter-skip-aarch64" "$ok"
+rm -f arm.out build_arch_filter.dhall
+
+# ---- Case A3: arch-dhall-env: Dhall interpolation of DHAKE_ARCH ----
+cat > build_arch_dhall_env.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets = [ { mapKey = "dhall-env", mapValue = { deps = [] : List Text, phony = False, recipe = [ < Shell = "echo ${env:DHAKE_ARCH} > dhall_arch.txt" > ] } } ], default = "dhall-env" }
+BUILDEOF
+
+"$BIN" -f build_arch_dhall_env.dhall --arch=aarch64 > /tmp/dhake-out-a3.txt 2> /tmp/dhake-err-a3.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f dhall_arch.txt ] || { echo "  dhall_arch.txt not created"; ok=0; }
+grep -q 'aarch64' dhall_arch.txt || { echo "  dhall_arch.txt does not contain aarch64"; ok=0; }
+check "arch-dhall-env" "$ok"
+rm -f build_arch_dhall_env.dhall dhall_arch.txt
+
+# ---- Case A4: arch-field-bare: bare arch field value (Optional Text) ----
+cat > build_arch_field_bare.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, arch : Text }
+in  { targets = [ { mapKey = "x86-target", mapValue = { deps = [] : List Text, phony = False, recipe = [ < Shell = "touch x86_target.out" > ], arch = "x86_64" } } ], default = "x86-target" }
+BUILDEOF
+
+# Build with matching arch: should succeed
+"$BIN" -f build_arch_field_bare.dhall --arch=x86_64 > /tmp/dhake-out-a4.txt 2> /tmp/dhake-err-a4.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f x86_target.out ] || { echo "  x86_target.out not created"; ok=0; }
+check "arch-field-bare-match" "$ok"
+rm -f x86_target.out
+
+# Build with non-matching arch: target should be filtered out, no output
+"$BIN" -f build_arch_field_bare.dhall --arch=aarch64 > /tmp/dhake-out-a4b.txt 2> /tmp/dhake-err-a4b.txt
+rc=$?
+ok=1
+[ "$rc" -eq 2 ] || { echo "  expected exit 2 (no target to build), got $rc"; ok=0; }
+[ ! -f x86_target.out ] || { echo "  x86_target.out should NOT have been created"; ok=0; }
+check "arch-field-bare-skip" "$ok"
+rm -f build_arch_field_bare.dhall
+
+# ---- Case A5: arch-optional: arch : Optional Text via Some / None ----
+cat > build_arch_optional.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, arch : Optional Text }
+in  { targets =
+        [ { mapKey = "some-arm", mapValue = { deps = [] : List Text, phony = False, recipe = [ < Shell = "touch some_arm.out" > ], arch = Some "aarch64" } }
+        , { mapKey = "none-any", mapValue = { deps = [] : List Text, phony = False, recipe = [ < Shell = "touch none_any.out" > ], arch = None Text } }
+        ]
+    , default = "none-any"
+    }
+BUILDEOF
+
+# Some "aarch64" target skipped under x86_64; None (any-arch) target builds
+"$BIN" -f build_arch_optional.dhall --arch=x86_64 > /tmp/dhake-out-a5.txt 2> /tmp/dhake-err-a5.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f none_any.out ] || { echo "  none_any.out (None/any-arch) not created"; ok=0; }
+[ ! -f some_arm.out ] || { echo "  some_arm.out (Some aarch64) should NOT be created under x86_64"; ok=0; }
+check "arch-optional-skip-some" "$ok"
+rm -f none_any.out
+
+# Some "aarch64" target built explicitly under aarch64
+"$BIN" -f build_arch_optional.dhall --arch=aarch64 some-arm > /tmp/dhake-out-a5b.txt 2> /tmp/dhake-err-a5b.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f some_arm.out ] || { echo "  some_arm.out (Some aarch64) not created under aarch64"; ok=0; }
+check "arch-optional-build-some" "$ok"
+rm -f build_arch_optional.dhall some_arm.out
+
 echo
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

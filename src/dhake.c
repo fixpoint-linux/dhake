@@ -37,6 +37,7 @@
 #include <libc/sysv/consts/in.h>
 #include <stddef.h>
 #include <sys/auxv.h>
+#include <sys/utsname.h>
 #include <stdint.h>
 
 extern const int __NR_socket;
@@ -90,6 +91,8 @@ typedef struct Target {
     int nunveil;
     /* working directory for recipe execution (NULL = build root) */
     char *cwd;
+    /* architecture filter (NULL = any arch) */
+    char *arch;
     /* verified builds */
     Hash *out_hash;        /* expected output hash (NULL = no check) */
     DepHash *dep_hash;    /* expected dep hashes */
@@ -133,6 +136,10 @@ typedef struct {
 static DefineEntry *defines = NULL;
 static int ndefines = 0;
 static int defines_cap = 0;
+
+/* --arch=NAME support */
+static char *arch_param = NULL;
+static const char *arch_value = NULL;
 
 static void apply_defines(void) {
     for (int i = 0; i < ndefines; i++) {
@@ -189,6 +196,19 @@ static void die(const char *fmt, ...) {
     fputc('\n', stderr);
     va_end(ap);
     exit(2);
+}
+
+/* Detect the native architecture using uname(). Normalizes arm64 to aarch64. */
+static const char *detect_arch(void) {
+    static char machine[256];
+    struct utsname u;
+    if (uname(&u) != 0) return "unknown";
+    if (!strcmp(u.machine, "arm64") || !strcmp(u.machine, "ARM64") || !strcmp(u.machine, "aarch64"))
+        return "aarch64";
+    if (!strcmp(u.machine, "x86_64") || !strcmp(u.machine, "amd64") || !strcmp(u.machine, "AMD64"))
+        return "x86_64";
+    snprintf(machine, sizeof machine, "%s", u.machine);
+    return machine;
 }
 
 static char *read_file(const char *path, size_t *len_out) {
@@ -669,6 +689,21 @@ static Target *map_target(Term *mapValue, const char *name) {
         t->cwd = NULL;
     }
 
+    /* optional arch (bare Text, or Optional Text via Some/None) */
+    Term *archt = rec_get(mapValue, "arch");
+    if (archt) {
+        if (archt->tag == TmSome) archt = archt->as.some.val;  /* Some "x" */
+        if (archt->tag == TmText) {
+            t->arch = term_text_cstr(archt);
+        } else if (archt->tag == TmNone) {
+            t->arch = NULL;
+        } else {
+            die("target '%s': 'arch' must be Text", name);
+        }
+    } else {
+        t->arch = NULL;
+    }
+
     /* verified builds: optional hash and depsHash */
     Term *hash_term = rec_get(mapValue, "hash");
     if (hash_term) {
@@ -781,6 +816,22 @@ static Target *find_target(Build *b, const char *name) {
     for (Target *t = b->targets; t; t = t->next)
         if (!strcmp(t->name, name)) return t;
     return NULL;
+}
+
+/* Filter targets by architecture: remove targets whose arch != arch_value. */
+static void filter_arch(Build *b) {
+    Target **prevp = &b->targets;
+    for (Target *t = b->targets; t; ) {
+        Target *next = t->next;
+        if (t->arch && strcmp(t->arch, arch_value) != 0) {
+            /* remove t from the intrusive list */
+            *prevp = next;
+            b->ntargets--;
+        } else {
+            prevp = &t->next;
+        }
+        t = next;
+    }
 }
 
 /* Resolve each dep name to a Target* (NULL => a plain source file, not a
@@ -2155,7 +2206,7 @@ static void run_graph(Build *b, const char *format) {
 static void usage(const char *argv0) {
     printf("dhake — a Make-like build tool driven by a Dhall buildfile\n\n");
     printf("Usage:\n");
-    printf("  %s [-f FILE] [-j N] [-n] [-D KEY=VALUE|--define KEY=VALUE] [--list] [--warn-hash-mismatch] [--verify|--check] [--lock[=FILE]] [--hash-uptodate|--content-addressed] [--watch|-w] [--explain|--why] [--graph[=dot|mermaid]] [--quiet|-s] [target ...]\n", argv0);
+    printf("  %s [-f FILE] [-j N] [-n] [-D KEY=VALUE|--define KEY=VALUE] [--arch=NAME] [--list] [--warn-hash-mismatch] [--verify|--check] [--lock[=FILE]] [--hash-uptodate|--content-addressed] [--watch|-w] [--explain|--why] [--graph[=dot|mermaid]] [--quiet|-s] [target ...]\n", argv0);
     printf("  %s -h | --help\n\n", argv0);
     printf("Options:\n");
     printf("  -f FILE    buildfile to evaluate (default: ./Dhakefile.dhall, else ./build.dhall)\n");
@@ -2193,6 +2244,10 @@ static void usage(const char *argv0) {
     printf("             inject KEY=VALUE into the buildfile evaluation environment,\n");
     printf("             making it available to env: imports (e.g. env:CC). Multiple\n");
     printf("             --define options accumulate; scoped to evaluation only\n");
+    printf("  --arch=NAME\n");
+    printf("             set the architecture to NAME for this build; makes DHAKE_ARCH=NAME\n");
+    printf("             available in recipes via $DHAKE_ARCH and in buildfiles via\n");
+    printf("             ${env:DHAKE_ARCH}. Default: auto-detected via uname()\n");
     printf("  target     build the named target(s); default: the buildfile's 'default'\n");
 }
 
@@ -2236,6 +2291,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--watch") || !strcmp(a, "-w")) { watch_mode = true; }
         else if (!strcmp(a, "--explain") || !strcmp(a, "--why")) { want_explain = true; }
         else if (!strcmp(a, "--quiet") || !strcmp(a, "-s")) { quiet = true; }
+        else if (!strncmp(a, "--arch=", 7)) {
+            const char *v = a + 7;
+            if (!*v) die("--arch requires a name (use --arch=NAME)");
+            arch_param = strdup(v);
+        }
         else if (!strcmp(a, "--graph")) { graph_format = "dot"; }
         else if (!strncmp(a, "--graph=", 8)) {
             const char *f = a + 8;
@@ -2245,6 +2305,10 @@ int main(int argc, char **argv) {
         else if (a[0] == '-') { die("unknown option '%s'", a); }
         else { if (nwanted == wanted_cap) { wanted_cap = wanted_cap ? wanted_cap * 2 : 4; wanted = realloc(wanted, (size_t)wanted_cap * sizeof(char *)); } wanted[nwanted++] = a; }
     }
+
+    /* Set arch_value and DHAKE_ARCH env var (persists into recipe children) */
+    arch_value = arch_param ? arch_param : detect_arch();
+    setenv("DHAKE_ARCH", arch_value, 1);
 
     if (want_list) {
         apply_defines();
@@ -2282,6 +2346,11 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "dhake: warning: landlock sandbox unavailable (requested): %s\n", why);
             }
         }
+
+        /* Filter targets by architecture (skip targets whose arch != current arch) */
+        /* Do NOT filter in --list/--graph/--lock paths (those are topology dumps) */
+        if (!want_list && !graph_format && !lock_path && !want_verify && !want_explain)
+            filter_arch(b);
 
         resolve_deps(b);
 

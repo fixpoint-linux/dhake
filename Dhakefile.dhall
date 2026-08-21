@@ -49,6 +49,7 @@ let Action =
 let Target = { deps : List Text, phony : Bool, recipe : List Action
              , hash : Optional Text
              , depsHash : Optional (List { path : Text, hash : Text })
+             , arch : Optional Text
              }
 
 -- dhall-c interpreter core sources + headers (must match Makefile CORE_DHALL;
@@ -124,24 +125,42 @@ let coreHashes =
         }
       ]
 
-in  { targets =
-        [ { mapKey = "dhake.com"
+-- One Dhakefile cross-compiles N targets: `cTarget` builds the C binary for a
+-- given architecture. Select which to build with --arch=NAME (default:
+-- auto-detected native). E.g.:
+--
+--     ./dhake.com.dbg                       # build dhake.com (native x86_64)
+--     ./dhake.com.dbg --arch=aarch64        # build dhake.com (fat APE)  [*]
+--     ./dhake.com.dbg --arch=aarch64 dhake.aarch64.elf   # aarch64 ELF
+--
+-- [*] dhake.com is a fat APE and contains all archs; its `arch` field only
+-- gates which recipe the default resolves to. dhake.aarch64.elf is the
+-- single-arch aarch64 ELF produced by aarch64-unknown-cosmo-cc.
+let cTarget = \(arch : Text) ->
+      let cc  = if arch == "aarch64" then "aarch64-unknown-cosmo-cc" else "cosmocc"
+      let out = if arch == "aarch64" then "dhake.aarch64.elf" else "dhake.com"
+      let outHash =
+            if arch == "aarch64"
+            then "sha256:77fd4a416b9eb5fbd0c6e6d546a24ae3f049b5ce5ff04fa8afeda1afe5dd99f2"
+            else "sha256:2e8abaaf0093d83d3ff7c1fe8f728a1d5c69e7beae57bb830d8572c2cef55cc0"
+      in  { mapKey = out
           , mapValue =
               { deps = [ "src/dhake.c" ] # core
               , phony = False
-              -- expected hash of the produced dhake.com (verified after build)
-              , hash = "sha256:88db5d4dd76237cc034f9e63b14042dbaaa04b170604c605cb1abdd4dee6942d"
+              , arch = Some arch
+              -- expected hash of the produced binary (verified after build)
+              , hash = outHash
               -- expected hash of each source dep (verified before build)
               , depsHash =
                   [ { path = "src/dhake.c"
-                    , hash = "sha256:bad7f5eccfccd463438b554d734cf4b18559f412b8125b9bd4c2fc8f55e94a62"
+                    , hash = "sha256:66718ddd2bbba482b19e47bb5fad7d9f7292d90b31427a27182d18402c190e13"
                     }
                   ] # coreHashes
               , recipe =
                   [ < Shell =
-                        "cosmocc -std=c11 -O2 -g -Wall -Wextra "
+                        cc ++ " -std=c11 -O2 -g -Wall -Wextra "
                       ++ "-D_POSIX_C_SOURCE=200809L -I vendor/dhall-c/src "
-                      ++ "-o dhake.com src/dhake.c vendor/dhall-c/src/arena.c "
+                      ++ "-o " ++ out ++ " src/dhake.c vendor/dhall-c/src/arena.c "
                       ++ "vendor/dhall-c/src/lexer.c vendor/dhall-c/src/parser.c "
                       ++ "vendor/dhall-c/src/ast.c vendor/dhall-c/src/normalize.c "
                       ++ "vendor/dhall-c/src/typecheck.c vendor/dhall-c/src/builtins.c "
@@ -152,8 +171,17 @@ in  { targets =
                   ]
               }
           }
+
+-- dhall-c's parser does not allow function application directly inside a list
+-- literal, so bind each per-arch target to a let first.
+let x86 = cTarget "x86_64"
+let arm = cTarget "aarch64"
+
+in  { targets =
+        [ x86
+        , arm
         , { mapKey = "clean"
-          , mapValue = { deps = [] : List Text, phony = True, recipe = [ < Rm = "dhake.com" > ] }
+          , mapValue = { deps = [] : List Text, phony = True, recipe = [ < Rm = "dhake.com" > ], arch = None Text }
           }
 
         -- ─── docs site ───────────────────────────────────────────────────────

@@ -43,13 +43,13 @@ rebuilding from source needs the toolchain).
 ## Test
 
 ```sh
-./tests/build.sh ./dhake.com.dbg     # 18 end-to-end cases
+./tests/build.sh ./dhake.com.dbg     # 22 end-to-end cases
 ```
 
 ## Usage
 
 ```
-dhake [-f FILE] [-j N] [-n] [-D KEY=VALUE|--define KEY=VALUE] [--list] [--warn-hash-mismatch] [--lock[=FILE]] [--verify|--check] [--hash-uptodate] [--watch|-w] [--explain|--why] [--graph[=dot|mermaid]] [--quiet|-s] [target ...]
+dhake [-f FILE] [-j N] [-n] [-D KEY=VALUE|--define KEY=VALUE] [--arch=NAME] [--list] [--warn-hash-mismatch] [--lock[=FILE]] [--verify|--check] [--hash-uptodate] [--watch|-w] [--explain|--why] [--graph[=dot|mermaid]] [--quiet|-s] [target ...]
 ```
 
 - `-f FILE` — buildfile to evaluate (default: `./Dhakefile.dhall`, else `./build.dhall`)
@@ -65,6 +65,7 @@ dhake [-f FILE] [-j N] [-n] [-D KEY=VALUE|--define KEY=VALUE] [--list] [--warn-h
 - `--graph[=dot|mermaid]` — pure diagnostic: dump the full dependency graph and exit. Default format is `dot` (Graphviz); `mermaid` is also supported. Shows target→dep edges, phony targets with different styling, and expected output hashes on node labels.
 - `--quiet` / `-s` — suppress per-recipe command echo (summary lines like "building..." and errors are still shown)
 - `-D KEY=VALUE` / `--define KEY=VALUE` — inject `KEY=VALUE` into the buildfile evaluation environment, making it available to `env:KEY` imports (CMake-style). Use the same Dhakefile for debug/release builds by passing different `--define` values.
+- `--arch=NAME` — set the architecture to `NAME` for this build. This sets the `DHAKE_ARCH` environment variable (available in recipes via `$DHAKE_ARCH` and in buildfiles via `${env:DHAKE_ARCH}`). Targets with an `arch` field that doesn't match are skipped. Default: auto-detected via `uname()`.
 - `target` — build named target(s); default is the buildfile's `default`
 
 Exit codes: `0` success; the failing recipe's exit code on a recipe failure
@@ -93,6 +94,7 @@ let Target = { deps : List Text, phony : Bool, recipe : List Action
              , hash : Optional Text        -- expected hash of output (verified builds)
              , depsHash : Optional (List { path : Text, hash : Text })
              , cwd : Text                 -- working directory for recipe execution
+             , arch : Optional Text       -- target architecture (e.g. "x86_64", "aarch64"); only built when --arch matches
              }
 in  { targets = List { mapKey : Text, mapValue : Target }
     , default : Text
@@ -102,7 +104,7 @@ in  { targets = List { mapKey : Text, mapValue : Target }
 
 `deps`, `phony` and `recipe` are required. `unveil` on a target and the
  top-level `sandbox` block are optional (see [Sandboxing](#sandboxing-landlock)).
- The `hash` and `depsHash` fields are also optional (see [Verified builds](#verified-builds)).
+ The `hash`, `depsHash`, `cwd`, and `arch` fields are also optional (see [Verified builds](#verified-builds)).
 
 Each target has:
 
@@ -120,6 +122,11 @@ Each target has:
 - **`cwd`** — optional working directory for recipe execution. When set, the recipe
   runs in that subdirectory (relative to the build root). Useful for building in
   subdirectories without shell `cd` boilerplate.
+- **`arch`** — optional architecture filter. When set to a value like `"x86_64"` or `"aarch64"`,
+  the target will only be built when `--arch` matches this value (or when `--arch` is not
+  specified and the auto-detected architecture matches). Targets without an `arch` field
+  are built on all architectures. The current architecture is available in recipes via
+  `$DHAKE_ARCH` and in buildfiles via `${env:DHAKE_ARCH}`.
 
 ### Recursive Mkdir / Rm
 

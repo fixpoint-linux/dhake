@@ -37,10 +37,14 @@ jobs:
           node-version: 20
           cache: npm
 
-      - name: Build the docs site (elm + SSG)
+      - name: "Build the docs site (dhake: elm + MFE vendor + SSG)"
+        # The build is driven by dhake (./Dhakefile.dhall, dist/index.html
+        # target). `npm ci` above provides the tooling dhake shells out to
+        # (elm, happy-dom, tsc in the mfe-framework submodule). dhake.com is
+        # the committed bootstrap binary in this repo.
         run: |
           npm ci
-          npm run build
+          ./dhake.com dist/index.html
 
       - name: Assemble deploy bundle
         run: |

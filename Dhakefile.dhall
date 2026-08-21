@@ -71,6 +71,63 @@ in  { targets =
         , { mapKey = "clean"
           , mapValue = { deps = [] : List Text, phony = True, recipe = [ < Rm = "dhake.com" > ] }
           }
+
+        -- ─── docs site ───────────────────────────────────────────────────────
+        -- The docs site (dhake.fixpointlinux.org) is an Elm app (src/Main.elm)
+        -- rendered against the shared Fixpoint.* design package (the `design`
+        -- submodule) plus the mfe-framework. This mirrors the main site's
+        -- Dhakefile pipeline; the only difference is the ssg emits dist/index.html.
+        --
+        --   mfe-framework -> vendor-mfe -> dist/elm.js -> dist/index.html
+        --
+        , { mapKey = "mfe-framework"
+          , mapValue =
+              { deps = []
+              , phony = True
+              , recipe = [ < Shell = "cd mfe-framework && npm ci && npm run build" > ]
+              }
+          }
+        , { mapKey = "vendor-mfe"
+          , mapValue =
+              { deps = [ "mfe-framework" ]
+              , phony = True
+              , recipe =
+                  [ < Shell = "/bin/rm -rf vendor/@mfe" >
+                  , < Shell =
+                        "/bin/mkdir -p vendor/@mfe/core vendor/@mfe/framework"
+                    >
+                  , < Shell =
+                        "cp mfe-framework/packages/core/dist/*.js vendor/@mfe/core/"
+                    >
+                  , < Shell =
+                        "cp mfe-framework/packages/framework/dist/*.js vendor/@mfe/framework/"
+                    >
+                  ]
+              }
+          }
+        , { mapKey = "dist/elm.js"
+          , mapValue =
+              { deps = [ "src/Main.elm", "elm.json", "design/src" ]
+              , phony = False
+              , recipe =
+                  [ < Shell =
+                        "node_modules/elm/bin/elm make src/Main.elm --output=dist/elm.js --optimize"
+                    >
+                  ]
+              }
+          }
+        , { mapKey = "dist/index.html"
+          , mapValue =
+              { deps =
+                  [ "dist/elm.js"
+                  , "vendor-mfe"
+                  , "shell/index.html"
+                  , "scripts/ssg.mjs"
+                  ]
+              , phony = False
+              , recipe = [ < Shell = "node scripts/ssg.mjs" > ]
+              }
+          }
         ]
       , default = "dhake.com"
       }

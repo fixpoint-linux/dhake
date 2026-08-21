@@ -9,12 +9,11 @@
 
 import { createApp } from '@mfe/framework';
 
-// Works at both the Pages subpath (fixpoint-linux.github.io/dhake/) and the
-// domain root. The framework's basePath option scopes route matching to the
-// repo subpath: on GitHub Pages the initial pathname is '/dhake/' (or
-// '/dhake'), so we derive the first path segment as the base and the root
-// route '/' matches after it is stripped. At the domain root the first
-// segment is absent, so basePath is '/' and matching is unchanged.
+// Works at the domain root (dhake.fixpointlinux.org) and, should the base path
+// change, at any subpath. The framework's basePath option scopes route matching
+// to the first path segment: at the root the first segment is absent, so
+// basePath is '/' and matching is unchanged; under a subpath (e.g. GitHub
+// Pages '/dhake') it is derived as that segment.
 const basePath = (() => {
   const first = window.location.pathname.split('/').filter(Boolean)[0];
   return first ? `/${first}` : '/';

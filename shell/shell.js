@@ -9,37 +9,26 @@
 
 import { createApp } from '@mfe/framework';
 
-// Works at the domain root (dhake.fixpointlinux.org) and, should the base path
-// change, at any subpath. The framework's basePath option scopes route matching
-// to the first path segment: at the root the first segment is absent, so
-// basePath is '/' and matching is unchanged; under a subpath (e.g. GitHub
-// Pages '/dhake') it is derived as that segment.
-const basePath = (() => {
-  const first = window.location.pathname.split('/').filter(Boolean)[0];
-  return first ? `/${first}` : '/';
-})();
-
-// The SSG output only pre-renders the home route; a deep link/refresh on a
-// remote route must do a fresh client render instead of rehydrating the
-// pre-rendered home DOM into the wrong route. Compare the (base-stripped)
-// pathname against basePath to decide whether we're on the home route.
-const isHome =
-  (window.location.pathname.replace(/\/+$/, '') || '/') === basePath;
-
+// The dhake site is served at /dhake/ on fixpointlinux.org. Its route table
+// mirrors the main site exactly: '/' is the fixpoint-linux landing and
+// '/dhake' is this dhake page. Matching the main site means a data-mfe-route
+// like '/dhake' or '/' resolves the same way on either page, so cross-site
+// MFE nav links agree on the target route.
 const app = await createApp({
   root: document.getElementById('app'),
   routes: [
-    { path: '/', template: 'dhake', name: 'home' },
-    { path: '/fixpoint-linux', template: 'fixpoint', name: 'fixpoint' },
+    { path: '/', template: 'fixpoint', name: 'home' },
+    { path: '/dhake', template: 'dhake', name: 'dhake' },
   ],
-  basePath,
-  // Absolute, basePath-scoped template URL. On a GitHub Pages deep link (e.g.
-  // /dhake/fixpoint-linux) the requested path has extra segments, so a relative
-  // baseURL like './shell/templates' would resolve to the wrong location and
-  // the route template would 404. Resolving against basePath (e.g. '/dhake')
-  // yields '/dhake/shell/templates' regardless of the deep-link subpath.
-  baseURL: `${basePath.replace(/\/+$/, '')}/shell/templates`,
-  ssr: isHome,
+  basePath: '/',
+  // dhake's templates are served from /dhake/shell/templates (the main site
+  // owns /shell/templates). Pin the baseURL here so both route templates
+  // resolve under this site's shell regardless of the deep-link subpath.
+  baseURL: '/dhake/shell/templates',
+  // The SSG output only pre-renders the dhake home route. Rehydrate only when
+  // the current pathname matches that pre-rendered route (i.e. the dhake page);
+  // any other path (including the landing) needs a fresh client render.
+  ssr: (window.location.pathname.replace(/\/+$/, '') || '/') === '/dhake',
 });
 
 // Expose the app handle so the shell/host can inspect or drive it later.

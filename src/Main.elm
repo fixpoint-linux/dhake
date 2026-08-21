@@ -105,7 +105,7 @@ navView =
                 , text "://dhake"
                 ]
         , links =
-            [ a [ class "home", href "https://fixpointlinux.org/", attribute "data-mfe-route" "/fixpoint-linux" ]
+            [ a [ class "home", href "https://fixpointlinux.org/", attribute "data-mfe-route" "/" ]
                 [ text "fixpoint-linux" ]
             , Fixpoint.Nav.link "#build" "build"
             , Fixpoint.Nav.link "#features" "features"

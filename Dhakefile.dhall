@@ -123,7 +123,7 @@ in  { targets =
               { deps = [ "src/dhake.c" ] # core
               , phony = False
               -- expected hash of the produced dhake.com (verified after build)
-              , hash = "sha256:2f827a5de1e98a8a5de34cec20b92f613c490d3fcd515632236c609a0514007f"
+              , hash = "sha256:c3795737fbba59751ddbab1fbcd0c1c91883998fe9a2852c16582ac204a4ccdf"
               -- expected hash of each source dep (verified before build)
               , depsHash =
                   [ { path = "src/dhake.c"

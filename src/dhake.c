@@ -694,16 +694,53 @@ static int rm_rf(const char *path) {
     return 0;
 }
 
+/* Run a recipe shell command with the platform's real /bin/sh, NOT system().
+ *
+ * We deliberately avoid system(): cosmopolitan's embedded command interpreter
+ * (_cocmd, reached by system()) applies a '>' redirection by permanently
+ * reassigning fd 1 of the shell process, and ';'-chained commands run in that
+ * same process. So a recipe like `echo start; echo x > f; echo after; echo
+ * end` sends ALL of "start", "x", "after", "end" to the redirect target — only
+ * "start" ever reaches stdout. fork+execvp("/bin/sh","-c",cmd) hands the
+ * command to the real POSIX shell, which scopes each redirection to a single
+ * command, so redirects, $?, pipelines, etc. behave correctly.
+ *
+ * NOTE (parked): the proper fix is to patch cosmopolitan's cocmd.c to scope
+ * redirects to a single command and rebuild the libc/toolchain (forked at
+ * fixpoint-linux/cosmopolitan). Until that ships, this exec-shell is the
+ * workaround. The recipe child has already applied the landlock ruleset, and
+ * exec is not restricted by it, so /bin/sh and the commands it spawns still
+ * run. Returns exit code (0 = ok). */
+static int run_shell(const char *cmd) {
+    pid_t pid = fork();
+    if (pid == -1) {
+        fprintf(stderr, "dhake: failed to fork shell for '%s': %s\n", cmd, strerror(errno));
+        return 2;
+    }
+    if (pid == 0) {
+        /* child */
+        execl("/bin/sh", "sh", "-c", cmd, (char *)0);
+        fprintf(stderr, "dhake: exec '/bin/sh' for '%s' failed: %s\n", cmd, strerror(errno));
+        _exit(127);
+    }
+    /* parent */
+    int status;
+    if (waitpid(pid, &status, 0) == -1) {
+        fprintf(stderr, "dhake: waitpid for '%s': %s\n", cmd, strerror(errno));
+        return 2;
+    }
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return 2;                            /* signaled */
+}
+
 /* execute one action; returns exit code (0 = ok) */
 static int run_action(Action *a) {
     switch (a->kind) {
     case ACT_SHELL: {
         printf("%s\n", a->a);           /* echo, like make */
         fflush(stdout);
-        int st = system(a->a);
-        if (st == -1) { fprintf(stderr, "dhake: failed to spawn shell for '%s'\n", a->a); return 2; }
-        if (WIFEXITED(st)) return WEXITSTATUS(st);
-        return 2;                        /* signaled */
+        return run_shell(a->a);
     }
     case ACT_COPY:
         printf("cp %s %s\n", a->a, a->b);

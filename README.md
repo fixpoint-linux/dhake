@@ -149,6 +149,28 @@ in  { targets = ...
 
 **Fallback.** If landlock is unavailable (kernel < 5.13 or non-Linux), dhake prints a single warning (`landlock sandbox unavailable`) and runs the build **unsandboxed**, so the same buildfile works everywhere. This is what you get in a CI sandbox that blocks the landlock syscall.
 
+### Shell recipes
+
+Each `Shell` action is executed with the platform's real POSIX shell:
+
+```c
+fork + exec("/bin/sh", "-c", <recipe text>)
+```
+
+dhake deliberately does **not** use libc `system()`. Cosmopolitan's embedded command
+interpreter (`_cocmd`, which `system()` dispatches to) applies a `>` redirection by
+permanently reassigning the shell's fd 1, and `;`-chained commands run in that same
+process — so a recipe like `echo start; echo x > f; echo after; echo end` used to send
+**all four** lines to `f` (only `start` reached stdout). Delegating to the real
+`/bin/sh` scopes each redirection to a single command, so redirects, `$?`, pipelines
+and `&&`/`||` behave correctly.
+
+> **Note (parked).** The proper fix is upstream: patch cosmopolitan's `cocmd.c` to
+> scope redirects to a single command and rebuild the libc/toolchain (tracked as a
+> `fixpoint-linux/cosmopolitan` fork). Until that ships, this exec-shell is the
+> workaround. Because the Landlock sandbox only restricts WRITE-class rights (not
+> EXECUTE), `/bin/sh` and the tools a recipe spawns still run inside the sandbox.
+
 ### Example
 
 ```dhall

@@ -477,6 +477,30 @@ fi
 rm -f /dhake-landlock-other-$$
 check "sandbox-unveil-deny-other" "$ok"
 
+# ---- Case 25: Shell redirection is scoped to one command (stdout preserved) ----
+# Regression for the cosmopolitan system()/_cocmd bug: a '>' redirect used to
+# permanently redirect fd 1, so later ';'-chained commands silently wrote to
+# the file. dhake runs recipes via the real /bin/sh (run_shell), which scopes
+# each redirection, so 'start', 'after=0' and 'end' must reach stdout and only
+# 'x' must land in the file.
+cat > build_redirect.dhall <<'BUILDEOF'
+let Action = < Shell : Text | Copy : { from : Text, to : Text } | Mkdir : Text | Rm : Text | Touch : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { targets = [ { mapKey = "red", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Shell = "echo start; echo x > redirect_target.txt; echo after=$?; echo end" > ] } } ], default = "red" }
+BUILDEOF
+
+rm -f redirect_target.txt
+"$BIN" -f build_redirect.dhall > /tmp/dhake-out25.txt 2> /tmp/dhake-err25.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+grep -q '^start$' /tmp/dhake-out25.txt || { echo "  'start' missing from stdout"; ok=0; }
+grep -q '^after=0$' /tmp/dhake-out25.txt || { echo "  'after=0' missing from stdout (redirect leaked to file)"; ok=0; }
+grep -q '^end$' /tmp/dhake-out25.txt || { echo "  'end' missing from stdout (redirect leaked to file)"; ok=0; }
+if grep -q '^x$' /tmp/dhake-out25.txt; then echo "  'x' leaked to stdout instead of the file"; ok=0; fi
+[ "$(cat redirect_target.txt 2>/dev/null)" = "x" ] || { echo "  redirect_target.txt should contain exactly 'x'"; ok=0; }
+check "shell-redirect-scoped-stdout" "$ok"
+
 echo
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

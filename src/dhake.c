@@ -421,6 +421,9 @@ static bool want_explain = false;
 /* When --quiet / -s is given, suppress per-command echo output. */
 static bool quiet = false;
 
+/* When --graph[=FORMAT] is given, dump the dependency graph and exit. */
+static const char *graph_format = NULL;
+
 /* Human-readable name of a hash algorithm, for building "<algo>:<hex>" specs. */
 static const char *hash_algo_name(HashAlg alg) {
     switch (alg) {
@@ -2000,10 +2003,147 @@ static int run_explain(Target **order, int n) {
     return dirty_count;
 }
 
+/* Dump the full dependency graph as dot (default) or mermaid. */
+static void run_graph(Build *b, const char *format) {
+    bool is_dot = !strcmp(format, "dot");
+
+    if (is_dot) {
+        printf("digraph dhake {\n");
+        printf("  node [shape=box];\n");
+    } else {
+        printf("graph TD\n");
+    }
+
+    /* Track seen source-file leaf nodes to dedupe them. */
+    char **seen_leaves = NULL;
+    int nseen = 0, seen_cap = 0;
+
+    /* Emit all targets as nodes, then edges. */
+    for (Target *t = b->targets; t; t = t->next) {
+        /* Escape double quotes in name for dot */
+        char *escaped_name = NULL;
+        if (is_dot) {
+            /* Count quotes to allocate */
+            int quote_count = 0;
+            for (const char *p = t->name; *p; p++)
+                if (*p == '"') quote_count++;
+            if (quote_count > 0) {
+                escaped_name = malloc(strlen(t->name) + quote_count + 1);
+                char *q = escaped_name;
+                for (const char *p = t->name; *p; p++) {
+                    if (*p == '"') *q++ = '\\';
+                    *q++ = *p;
+                }
+                *q = '\0';
+            }
+        }
+        const char *node_name = escaped_name ? escaped_name : t->name;
+
+        if (is_dot) {
+            /* Node with hash info if present */
+            if (t->out_hash && t->out_hash->spec) {
+                char *escaped_spec = NULL;
+                int spec_quotes = 0;
+                for (const char *p = t->out_hash->spec; *p; p++)
+                    if (*p == '"') spec_quotes++;
+                if (spec_quotes > 0) {
+                    escaped_spec = malloc(strlen(t->out_hash->spec) + spec_quotes + 1);
+                    char *q = escaped_spec;
+                    for (const char *p = t->out_hash->spec; *p; p++) {
+                        if (*p == '"') *q++ = '\\';
+                        *q++ = *p;
+                    }
+                    *q = '\0';
+                }
+                const char *spec = escaped_spec ? escaped_spec : t->out_hash->spec;
+                printf("  \"%s\" [label=\"%s\\n%s\",%s];\n",
+                       node_name, node_name, spec,
+                       t->phony ? "shape=ellipse,style=dashed" : "");
+                free(escaped_spec);
+            } else {
+                printf("  \"%s\" [%s];\n",
+                       node_name,
+                       t->phony ? "shape=ellipse,style=dashed" : "");
+            }
+        } else {
+            /* Mermaid: use () for phony targets, [] for regular */
+            if (t->phony) {
+                if (t->out_hash && t->out_hash->spec) {
+                    printf("  %s[(\"%s\\n%s\")]\n", node_name, node_name, t->out_hash->spec);
+                } else {
+                    printf("  %s[(\"%s\")]\n", node_name, node_name);
+                }
+            } else {
+                if (t->out_hash && t->out_hash->spec) {
+                    printf("  %s[\"%s\\n%s\"]\n", node_name, node_name, t->out_hash->spec);
+                } else {
+                    printf("  %s[\"%s\"]\n", node_name, node_name);
+                }
+            }
+        }
+
+        free(escaped_name);
+
+        /* Emit edges for this target's dependencies */
+        for (int j = 0; j < t->ndeps; j++) {
+            Target *dep_target = t->dep_targets[j];
+            if (dep_target) {
+                /* Target dependency */
+                if (is_dot) {
+                    printf("  \"%s\" -> \"%s\";\n", node_name, dep_target->name);
+                } else {
+                    printf("  %s --> %s\n", node_name, dep_target->name);
+                }
+            } else {
+                /* Source file leaf dependency */
+                const char *dep_name = t->deps[j];
+
+                /* Check if we've seen this leaf before */
+                bool seen = false;
+                for (int k = 0; k < nseen; k++) {
+                    if (!strcmp(seen_leaves[k], dep_name)) {
+                        seen = true;
+                        break;
+                    }
+                }
+
+                if (!seen) {
+                    /* Add to seen set */
+                    if (nseen == seen_cap) {
+                        seen_cap = seen_cap ? seen_cap * 2 : 4;
+                        seen_leaves = realloc(seen_leaves, (size_t)seen_cap * sizeof(char *));
+                    }
+                    seen_leaves[nseen++] = (char *)dep_name;  /* borrow pointer from t->deps */
+
+                    /* Emit leaf node */
+                    if (is_dot) {
+                        printf("  \"%s\" [shape=ellipse,color=gray];\n", dep_name);
+                    } else {
+                        printf("  %s[\"%s\"]\n", dep_name, dep_name);
+                    }
+                }
+
+                /* Emit edge to leaf */
+                if (is_dot) {
+                    printf("  \"%s\" -> \"%s\";\n", node_name, dep_name);
+                } else {
+                    printf("  %s --> %s\n", node_name, dep_name);
+                }
+            }
+        }
+    }
+
+    free(seen_leaves);
+
+    if (is_dot) {
+        printf("}\n");
+    }
+}
+
 static void usage(const char *argv0) {
     printf("dhake — a Make-like build tool driven by a Dhall buildfile\n\n");
     printf("Usage:\n");
-    printf("  %s [-f FILE] [-j N] [-n] [-D KEY=VALUE|--define KEY=VALUE] [--list] [--warn-hash-mismatch] [--verify|--check] [--lock[=FILE]] [--hash-uptodate|--content-addressed] [--watch|-w] [--explain|--why] [--quiet|-s] [target ...]\n", argv0);
+    printf("  %s [-f FILE] [-j N] [-n] [-D KEY=VALUE|--define KEY=VALUE] [--list] [--warn-hash-mismatch] [--verify|--check] [--lock[=FILE]] [--hash-uptodate|--content-addressed] [--watch|-w] [--explain|--why] [--graph[=dot|mermaid]] [--quiet|-s] [target ...]\n", argv0);
     printf("  %s -h | --help\n\n", argv0);
     printf("Options:\n");
     printf("  -f FILE    buildfile to evaluate (default: ./Dhakefile.dhall, else ./build.dhall)\n");
@@ -2031,6 +2171,9 @@ static void usage(const char *argv0) {
     printf("  --explain / --why\n");
     printf("             explain why each target in the requested subgraph needs rebuilding\n");
     printf("             (or is up to date); pure diagnostic, does not run recipes\n");
+    printf("  --graph[=dot|mermaid]\n");
+    printf("             dump the full dependency graph and exit; default format is dot,\n");
+    printf("             mermaid is also supported; pure diagnostic, does not run recipes\n");
     printf("  --quiet / -s\n");
     printf("             suppress per-recipe command echo (summary lines and errors\n");
     printf("             are still shown)\n");
@@ -2081,6 +2224,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--watch") || !strcmp(a, "-w")) { watch_mode = true; }
         else if (!strcmp(a, "--explain") || !strcmp(a, "--why")) { want_explain = true; }
         else if (!strcmp(a, "--quiet") || !strcmp(a, "-s")) { quiet = true; }
+        else if (!strcmp(a, "--graph")) { graph_format = "dot"; }
+        else if (!strncmp(a, "--graph=", 8)) {
+            const char *f = a + 8;
+            if (!strcmp(f, "dot") || !strcmp(f, "mermaid")) graph_format = f;
+            else die("--graph format must be 'dot' or 'mermaid'");
+        }
         else if (a[0] == '-') { die("unknown option '%s'", a); }
         else { if (nwanted == wanted_cap) { wanted_cap = wanted_cap ? wanted_cap * 2 : 4; wanted = realloc(wanted, (size_t)wanted_cap * sizeof(char *)); } wanted[nwanted++] = a; }
     }
@@ -2175,6 +2324,12 @@ int main(int argc, char **argv) {
         int ec = run_explain(order, n);
         free(roots); free(order); free((void *)wanted);
         return ec ? 1 : 0;
+    }
+
+    if (graph_format) {
+        run_graph(b, graph_format);
+        free(roots); free(order); free((void *)wanted);
+        return 0;
     }
 
     /* For parallel scheduling, we need to compute dirty at launch time.

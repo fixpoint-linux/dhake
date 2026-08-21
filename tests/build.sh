@@ -1432,6 +1432,66 @@ grep -q 'ok' leaked.txt || { echo "  leaked.txt should contain 'ok'"; ok=0; }
 check "define-not-leaked-to-recipe" "$ok"
 rm -f build_define_d3.dhall leaked.txt
 
+# ---- Case G1: --graph dot format ----
+# Create a buildfile with targets that have both target and source file dependencies
+cat > build_graph.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets = [ { mapKey = "compile", mapValue = { deps = ["source.c"], phony = False, recipe = [ < Shell = "cc -c source.c" > ] } }
+               , { mapKey = "link", mapValue = { deps = ["compile", "main.c"], phony = False, recipe = [ < Shell = "cc -o app compile.o main.c" > ] } }
+               , { mapKey = "all", mapValue = { deps = ["link"], phony = True, recipe = [] : List Action } }
+               ], default = "all" }
+BUILDEOF
+
+# Create source files
+write_file source.c 'int x = 1;'
+write_file main.c 'int main() { return 0; }'
+
+# Test --graph (default dot format)
+"$BIN" -f build_graph.dhall --graph > /tmp/dhake-out-g1.txt 2> /tmp/dhake-err-g1.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+grep -q 'digraph dhake' /tmp/dhake-out-g1.txt || { echo "  digraph dhake not found"; ok=0; }
+grep -q '"link" -> "compile"' /tmp/dhake-out-g1.txt || { echo "  link->compile edge not found"; ok=0; }
+grep -q '"link" -> "main.c"' /tmp/dhake-out-g1.txt || { echo "  link->main.c edge not found"; ok=0; }
+grep -q '"compile" -> "source.c"' /tmp/dhake-out-g1.txt || { echo "  compile->source.c edge not found"; ok=0; }
+grep -q '"all" -> "link"' /tmp/dhake-out-g1.txt || { echo "  all->link edge not found"; ok=0; }
+# Check phony styling
+grep -q 'shape=ellipse,style=dashed' /tmp/dhake-out-g1.txt || { echo "  phony styling not found"; ok=0; }
+# Check source file leaf nodes
+grep -Fq '"source.c" [shape=ellipse,color=gray]' /tmp/dhake-out-g1.txt || { echo "  source.c leaf node not found"; ok=0; }
+grep -Fq '"main.c" [shape=ellipse,color=gray]' /tmp/dhake-out-g1.txt || { echo "  main.c leaf node not found"; ok=0; }
+check "graph-dot-format" "$ok"
+rm -f build_graph.dhall source.c main.c
+
+# ---- Case G2: --graph=mermaid format ----
+# Recreate the buildfile and source files
+cat > build_graph.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets = [ { mapKey = "compile", mapValue = { deps = ["source.c"], phony = False, recipe = [ < Shell = "cc -c source.c" > ] } }
+               , { mapKey = "link", mapValue = { deps = ["compile", "main.c"], phony = False, recipe = [ < Shell = "cc -o app compile.o main.c" > ] } }
+               , { mapKey = "all", mapValue = { deps = ["link"], phony = True, recipe = [] : List Action } }
+               ], default = "all" }
+BUILDEOF
+
+write_file source.c 'int x = 1;'
+write_file main.c 'int main() { return 0; }'
+
+# Test --graph=mermaid
+"$BIN" -f build_graph.dhall --graph=mermaid > /tmp/dhake-out-g2.txt 2> /tmp/dhake-err-g2.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+grep -q 'graph TD' /tmp/dhake-out-g2.txt || { echo "  graph TD not found"; ok=0; }
+grep -q 'link --> compile' /tmp/dhake-out-g2.txt || { echo "  link-->compile edge not found"; ok=0; }
+grep -q 'link --> main.c' /tmp/dhake-out-g2.txt || { echo "  link-->main.c edge not found"; ok=0; }
+grep -q 'compile --> source.c' /tmp/dhake-out-g2.txt || { echo "  compile-->source.c edge not found"; ok=0; }
+grep -q 'all --> link' /tmp/dhake-out-g2.txt || { echo "  all-->link edge not found"; ok=0; }
+check "graph-mermaid-format" "$ok"
+rm -f build_graph.dhall source.c main.c
+
 echo
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

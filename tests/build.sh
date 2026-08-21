@@ -398,6 +398,85 @@ ok=1
 [ -e legacy_dir ] || { echo "  legacy_dir should still exist (remove() does not recurse)"; ok=0; }
 check "rm-legacy-nonrecursive" "$ok"
 
+# ---- Case 22: Landlock sandbox — write INSIDE the build tree is allowed ----
+# With sandbox.enable=True the recipe child is sandboxed (or falls back to
+# unsandboxed when landlock is unavailable, e.g. in a sandboxed CI). Writing a
+# file under cwd (auto-unveiled rwc) must succeed in both cases.
+cat > build_sandbox_inside.dhall <<'BUILDEOF'
+let Action = < Shell : Text | Copy : { from : Text, to : Text } | Mkdir : Text | Rm : Text | Touch : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { sandbox = { enable = True, unveil = [] : List Text }
+   , targets = [ { mapKey = "ok", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Shell = "echo hi > sandbox_inside.txt" > ] } } ], default = "ok" }
+BUILDEOF
+
+"$BIN" -f build_sandbox_inside.dhall > /tmp/dhake-out22.txt 2> /tmp/dhake-err22.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  sandboxed write-inside failed, rc=$rc"; ok=0; }
+[ -f sandbox_inside.txt ] || { echo "  sandbox_inside.txt not created"; ok=0; }
+check "sandbox-write-inside" "$ok"
+
+# ---- Case 23: Landlock sandbox — write OUTSIDE the build tree ----
+# Conditional: on a kernel with landlock the write is DENIED (recipe fails,
+# file not created); where landlock is unavailable (sandboxed CI) the recipe
+# succeeds but dhake emits the 'landlock sandbox unavailable' warning.
+rm -f /dhake-landlock-outside-$$ 
+cat > build_sandbox_outside.dhall <<'BUILDEOF'
+let Action = < Shell : Text | Copy : { from : Text, to : Text } | Mkdir : Text | Rm : Text | Touch : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { sandbox = { enable = True, unveil = [] : List Text }
+   , targets = [ { mapKey = "bad", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Shell = "touch /dhake-landlock-outside-$$" > ] } } ], default = "bad" }
+BUILDEOF
+
+"$BIN" -f build_sandbox_outside.dhall > /tmp/dhake-out23.txt 2> /tmp/dhake-err23.txt
+rc=$?
+ok=1
+if [ "$rc" -ne 0 ] && [ ! -e /dhake-landlock-outside-$$ ]; then
+    :   # landlock active: write denied, recipe failed, file not created
+elif grep -q 'landlock sandbox unavailable' /tmp/dhake-err23.txt; then
+    :   # landlock unavailable: fallback warning emitted
+else
+    echo "  expected denial OR 'landlock sandbox unavailable' warning (rc=$rc)"; ok=0
+fi
+rm -f /dhake-landlock-outside-$$
+check "sandbox-deny-write-outside" "$ok"
+
+# ---- Case 24: Landlock sandbox — unveil whitelist allows an external dir ----
+# With sandbox.enable=True and unveil=["rwc:./sandbox_ext"], writing into that
+# external dir is allowed while writing into a DIFFERENT external dir is denied
+# (conditional on landlock availability, same as case 23).
+mkdir -p sandbox_ext
+cat > build_sandbox_unveil.dhall <<'BUILDEOF'
+let Action = < Shell : Text | Copy : { from : Text, to : Text } | Mkdir : Text | Rm : Text | Touch : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { sandbox = { enable = True, unveil = [ "rwc:./sandbox_ext" ] }
+   , targets =
+     [ { mapKey = "allow", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Shell = "echo a > sandbox_ext/a.txt" > ] } }
+     , { mapKey = "deny", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Shell = "touch /dhake-landlock-other-$$" > ] } }
+     ], default = "allow" }
+BUILDEOF
+
+"$BIN" -f build_sandbox_unveil.dhall allow > /tmp/dhake-out24a.txt 2> /tmp/dhake-err24a.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  unveiled write failed, rc=$rc"; ok=0; }
+[ -f sandbox_ext/a.txt ] || { echo "  sandbox_ext/a.txt not created"; ok=0; }
+check "sandbox-unveil-allow" "$ok"
+
+rm -f /dhake-landlock-other-$$
+"$BIN" -f build_sandbox_unveil.dhall deny > /tmp/dhake-out24b.txt 2> /tmp/dhake-err24b.txt
+rc=$?
+ok=1
+if [ "$rc" -ne 0 ] && [ ! -e /dhake-landlock-other-$$ ]; then
+    :   # landlock active: non-whitelisted external write denied
+elif grep -q 'landlock sandbox unavailable' /tmp/dhake-err24b.txt; then
+    :   # landlock unavailable: fallback warning
+else
+    echo "  expected denial OR 'landlock sandbox unavailable' warning (rc=$rc)"; ok=0
+fi
+rm -f /dhake-landlock-other-$$
+check "sandbox-unveil-deny-other" "$ok"
+
 echo
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

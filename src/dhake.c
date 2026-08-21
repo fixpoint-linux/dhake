@@ -16,6 +16,7 @@
  *
  * Verified against dhall-c HEAD (src/parser.c dated 2026-08-20), cosmocc 14.1.0.
  */
+#define _GNU_SOURCE 1          /* expose prctl() in cosmopolitan libc */
 #include "dhall.h"
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -25,6 +26,9 @@
 #include <errno.h>
 #include <string.h>
 #include <ftw.h>
+#include <fcntl.h>
+#include <sys/prctl.h>
+#include <libc/calls/landlock.h>
 
 /* ------------------------------------------------------------------ */
 /* In-memory build plan                                                */
@@ -49,6 +53,9 @@ typedef struct Target {
     char **deps;           /* dep names as strings (buildfile order) */
     int ndeps;
     Action *recipe;        /* linked list, buildfile order */
+    /* sandbox unveil whitelist (per-target, "perms:path" entries) */
+    char **unveil;
+    int nunveil;
     /* resolved graph state */
     struct Target **dep_targets;   /* resolved Target* per dep */
     int state;             /* 0 unvisited, 1 visiting (cycle), 2 done */
@@ -63,6 +70,11 @@ typedef struct {
     Target *targets;       /* linked list, buildfile order */
     int ntargets;
     char *default_name;    /* NULL if none */
+    /* landlock sandbox config (from optional top-level `sandbox` field) */
+    bool sandbox_enabled;
+    char **unveil;         /* global "perms:path" whitelist entries */
+    int nunveil;
+    int landlock_abi;      /* probe result; <1 => unavailable */
 } Build;
 
 static Target *find_target(Build *b, const char *name);  /* fwd decl (defined later) */
@@ -160,6 +172,28 @@ static int list_length(Term *list) {
     int n = 0;
     for (Term *p = list; p && p->tag == TmCons; p = p->as.cons.tail) n++;
     return n;
+}
+
+/* Parse an optional `unveil : List Text` field into a strdup'd string array.
+ * Returns NULL (n_out=0) when the field is absent. */
+static char **parse_unveil_list(Term *rec, const char *where, int *n_out) {
+    *n_out = 0;
+    Term *u = rec_get(rec, "unveil");
+    if (!u) return NULL;
+    if (u->tag != TmNil && u->tag != TmCons)
+        die("%s: 'unveil' must be a List Text", where);
+    int n = list_length(u);
+    if (n == 0) return NULL;
+    char **out = calloc((size_t)n, sizeof(char *));
+    if (!out) die("out of memory");
+    int i = 0;
+    for (Term *p = u; p && p->tag == TmCons; p = p->as.cons.tail) {
+        char *s = term_text_cstr(p->as.cons.head);
+        if (!s) die("%s: unveil entry must be Text", where);
+        out[i++] = s;
+    }
+    *n_out = n;
+    return out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -296,6 +330,7 @@ static Target *map_target(Term *mapValue, const char *name) {
         }
     }
     t->phony = rec_bool(mapValue, "phony", false, name);
+    t->unveil = parse_unveil_list(mapValue, name, &t->nunveil);
 
     Term *recipe = rec_get(mapValue, "recipe");
     if (recipe && recipe->tag != TmNil) {
@@ -319,6 +354,14 @@ static Build *build_plan(Term *root) {
 
     Term *default_t = rec_get(root, "default");
     if (default_t) b->default_name = term_text_cstr(default_t);
+
+    /* optional sandbox config: { enable : Bool, unveil : List Text } */
+    Term *sb = rec_get(root, "sandbox");
+    if (sb) {
+        if (sb->tag != TmRecordLit) die("buildfile: 'sandbox' must be a record { enable, unveil }");
+        b->sandbox_enabled = rec_bool(sb, "enable", false, "buildfile");
+        b->unveil = parse_unveil_list(sb, "buildfile", &b->nunveil);
+    }
 
     Term *targets = rec_get(root, "targets");
     if (!targets) die("buildfile: missing 'targets' field");
@@ -474,6 +517,152 @@ static bool touch_file(const char *path) {
     tv[1] = tv[0];
     utimes(path, tv);
     return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* Landlock sandboxing (write-containment, v1)                         */
+/*                                                                     */
+/* Each recipe child applies a Landlock ruleset that handles ONLY the  */
+/* WRITE-class rights. READ/EXECUTE are deliberately left unhandled so */
+/* exec() of any tool (dynamic loader + libs + /bin/sh symlink) keeps  */
+/* working without unveiling every exec path. A rogue/buggy recipe can */
+/* write only under the unveiled directories (cwd, /tmp, whitelist).   */
+/* ------------------------------------------------------------------ */
+
+static bool landlock_warned = false;
+
+static int landlock_write_handled(int abi) {
+    unsigned long h = LANDLOCK_ACCESS_FS_WRITE_FILE
+                    | LANDLOCK_ACCESS_FS_REMOVE_DIR
+                    | LANDLOCK_ACCESS_FS_REMOVE_FILE
+                    | LANDLOCK_ACCESS_FS_MAKE_CHAR
+                    | LANDLOCK_ACCESS_FS_MAKE_DIR
+                    | LANDLOCK_ACCESS_FS_MAKE_REG
+                    | LANDLOCK_ACCESS_FS_MAKE_SOCK
+                    | LANDLOCK_ACCESS_FS_MAKE_FIFO
+                    | LANDLOCK_ACCESS_FS_MAKE_BLOCK
+                    | LANDLOCK_ACCESS_FS_MAKE_SYM;
+    if (abi >= 2) h |= LANDLOCK_ACCESS_FS_REFER;
+    if (abi >= 3) h |= LANDLOCK_ACCESS_FS_TRUNCATE;
+    return (int)h;
+}
+
+/* Map a perms string ({r,w,c,x}) to enforced write-class rights. `w` ->
+ * WRITE_FILE (+REFER/TRUNCATE per ABI); `c` -> make/remove rights; `r` and
+ * `x` are parsed but INERT in v1 (READ/EXECUTE are not handled). */
+static unsigned long landlock_perms_rights(const char *perms, int abi) {
+    unsigned long h = 0;
+    for (const char *p = perms; *p; p++) {
+        if (*p == 'w') {
+            h |= LANDLOCK_ACCESS_FS_WRITE_FILE;
+            if (abi >= 2) h |= LANDLOCK_ACCESS_FS_REFER;
+            if (abi >= 3) h |= LANDLOCK_ACCESS_FS_TRUNCATE;
+        } else if (*p == 'c') {
+            h |= LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR
+               | LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK
+               | LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK
+               | LANDLOCK_ACCESS_FS_MAKE_SYM
+               | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE;
+        }
+    }
+    return h;
+}
+
+/* Add a path-beneath rule for `path`. Non-fatal on ENOENT (path not yet
+ * created) — landlock rules are on inodes, so unveil a directory that will
+ * exist, or the parent of a to-be-created file. */
+static void landlock_allow(int rfd, const char *path, unsigned long rights) {
+    int fd = open(path, O_PATH | O_CLOEXEC);
+    if (fd < 0) return;
+    struct landlock_path_beneath_attr a = { .allowed_access = rights, .parent_fd = fd };
+    if (landlock_add_rule(rfd, LANDLOCK_RULE_PATH_BENEATH, &a, 0) != 0)
+        fprintf(stderr, "dhake: warning: landlock_add_rule('%s'): %s\n", path, strerror(errno));
+    close(fd);
+}
+
+/* Split an unveil entry "perms:path" (perms default rwc). Returns the perms
+ * string in `perms` and points *path_out at the path. */
+static void landlock_parse_entry(const char *entry, char *perms, size_t perms_sz,
+                                 const char **path_out) {
+    const char *colon = strchr(entry, ':');
+    if (colon && colon != entry) {
+        size_t plen = (size_t)(colon - entry);
+        int ok = (plen >= 1 && plen <= 4);   /* real perms tokens are short: max "rwcx" */
+        for (size_t i = 0; ok && i < plen; i++)
+            if (!strchr("rwcx", entry[i])) ok = 0;
+        if (ok && colon[1] != '\0' && plen < perms_sz) {  /* non-empty path after ':' */
+            memcpy(perms, entry, plen);
+            perms[plen] = '\0';
+            *path_out = colon + 1;
+            return;
+        }
+    }
+    snprintf(perms, perms_sz, "rwc");
+    *path_out = entry;
+}
+
+/* Add one whitelist entry ("perms:path"), expanding a leading ~ to $HOME. */
+static void landlock_allow_entry(int rfd, const char *entry, int abi) {
+    char perms[8];
+    const char *path;
+    landlock_parse_entry(entry, perms, sizeof perms, &path);
+    unsigned long rights = landlock_perms_rights(perms, abi);
+    if (rights == 0) return;          /* e.g. a pure "r:path" entry in v1 */
+    char *expanded = NULL;
+    if (path[0] == '~' && (path[1] == '/' || path[1] == '\0')) {
+        const char *home = getenv("HOME");
+        if (home && *home) {
+            const char *rest = path + 1;
+            if (asprintf(&expanded, "%s%s", home, rest) < 0) expanded = NULL;
+            if (expanded) path = expanded;
+        }
+    }
+    landlock_allow(rfd, path, rights);
+    free(expanded);
+}
+
+/* Apply the write-containment sandbox to the CURRENT process (called in the
+ * recipe child right after fork). Landlock restricts this thread + its
+ * future children, so builtin actions, system()'s /bin/sh, and ACT_RUN's
+ * exec child are all covered. All failures are non-fatal (build continues
+ * unsandboxed) but emit a single warning. */
+static void sandbox_child(Build *b, Target *t) {
+    if (!b->sandbox_enabled) return;
+    if (b->landlock_abi < 1) return;  /* unavailable; warned at probe */
+
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
+        if (!landlock_warned) { landlock_warned = true; fprintf(stderr, "dhake: warning: landlock sandbox unavailable (requested): prctl: %s\n", strerror(errno)); }
+        return;
+    }
+
+    struct landlock_ruleset_attr attr = { .handled_access_fs = landlock_write_handled(b->landlock_abi) };
+    int rfd = landlock_create_ruleset(&attr, sizeof attr, 0);
+    if (rfd < 0) {
+        if (!landlock_warned) { landlock_warned = true; fprintf(stderr, "dhake: warning: landlock sandbox unavailable (requested): create_ruleset: %s\n", strerror(errno)); }
+        return;
+    }
+
+    /* auto-unveil: build dir + /tmp + $TMPDIR + device nulls */
+    unsigned long rwc = landlock_perms_rights("rwc", b->landlock_abi);
+    landlock_allow(rfd, ".", rwc);
+    landlock_allow(rfd, "/tmp", rwc);
+    const char *td = getenv("TMPDIR");
+    if (td && *td && strcmp(td, "/tmp")) landlock_allow(rfd, td, rwc);
+    landlock_allow(rfd, "/dev/null", LANDLOCK_ACCESS_FS_WRITE_FILE);
+    landlock_allow(rfd, "/dev/zero", LANDLOCK_ACCESS_FS_WRITE_FILE);
+    landlock_allow(rfd, "/dev/full", LANDLOCK_ACCESS_FS_WRITE_FILE);
+    landlock_allow(rfd, "/dev/tty", LANDLOCK_ACCESS_FS_WRITE_FILE);
+
+    /* global then per-target whitelist */
+    for (int i = 0; i < b->nunveil; i++) landlock_allow_entry(rfd, b->unveil[i], b->landlock_abi);
+    if (t) for (int i = 0; i < t->nunveil; i++) landlock_allow_entry(rfd, t->unveil[i], b->landlock_abi);
+
+    if (landlock_restrict_self(rfd, 0) != 0) {
+        if (!landlock_warned) { landlock_warned = true; fprintf(stderr, "dhake: warning: landlock sandbox unavailable (requested): restrict_self: %s\n", strerror(errno)); }
+        close(rfd);
+        return;
+    }
+    close(rfd);
 }
 
 /* mkdir -p: create leading parent directories, ignoring EEXIST. */
@@ -684,6 +873,17 @@ int main(int argc, char **argv) {
     Term *root = eval_buildfile(buildfile);
     Build *b = build_plan(root);
 
+    /* probe landlock ABI (only when sandboxing is requested) */
+    b->landlock_abi = -1;
+    if (b->sandbox_enabled) {
+        b->landlock_abi = landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
+        if (b->landlock_abi < 1) {
+            landlock_warned = true;
+            fprintf(stderr, "dhake: warning: landlock sandbox unavailable (requested): %s\n",
+                    (b->landlock_abi < 0) ? strerror(errno) : "kernel lacks landlock support");
+        }
+    }
+
     if (want_list) {
         for (Target *t = b->targets; t; t = t->next)
             printf("%s%s\n", t->name,
@@ -868,7 +1068,8 @@ int main(int argc, char **argv) {
             }
 
             if (pid == 0) {
-                /* Child: run the full recipe, then _exit with the result */
+                /* Child: sandbox (landlock) then run the full recipe, then _exit */
+                sandbox_child(b, t);
                 int rc = 0;
                 for (Action *a = t->recipe; a; a = a->next) {
                     rc = run_action(a);

@@ -75,11 +75,17 @@ let Action = < Shell : Text
              | Env : { key : Text, value : Text }
              | Run : { argv : List Text }
              >
-let Target = { deps : List Text, phony : Bool, recipe : List Action }
+let Target = { deps : List Text, phony : Bool, recipe : List Action
+             , unveil : Optional (List Text)   -- per-target sandbox whitelist
+             }
 in  { targets = List { mapKey : Text, mapValue : Target }
     , default : Text
+    , sandbox : Optional { enable : Bool, unveil : List Text }
     }
 ```
+
+`deps`, `phony` and `recipe` are required. `unveil` on a target and the
+top-level `sandbox` block are optional (see [Sandboxing](#sandboxing-landlock)).
 
 Each target has:
 
@@ -119,6 +125,29 @@ or the equivalent ergonomic plain record:
 Without the flag the behaviour is unchanged: `Rm` only removes a single file or an
 empty directory (it fails on a non-empty directory rather than recursing), and
 `Mkdir` only creates one level.
+
+### Sandboxing (Landlock)
+
+dhake can run each recipe in a [Linux Landlock](https://www.kernel.org/doc/html/latest/userspace-api/landlock.html) sandbox — unprivileged, opt-in, like [landlock-make](https://justine.lol/make/). Enable it with a top-level `sandbox` block:
+
+```dhall
+in  { targets = ...
+    , default = "dhake.com"
+    , sandbox = { enable = True
+                , unveil = [ "rwc:~/.npm", "rwc:~/.cache", "rwc:~/.elm" ]
+                }
+    }
+```
+
+**Model (write containment).** The ruleset handles **only the WRITE-class rights** (write/create/remove/rename). READ and EXECUTE are deliberately left unrestricted, so recipes can still exec any tool (the shell, `cc`, `node`, …) and read any file — but a rogue or buggy recipe **cannot write outside the unveiled directories**. Landlock has no `chmod`/`chown` right, so those still work.
+
+**What is unveiled automatically.** The build directory (cwd), `/tmp`, `$TMPDIR`, and `/dev/{null,zero,full,tty}` — all read-write. Everything else is write-denied unless listed in `unveil`.
+
+**The `unveil` whitelist.** Entries are `"perms:path"`; the default perms are `rwc`. `w` and `c` are enforced in v1 (write/create/remove); `r` and `x` are parsed but inert (they'll take effect when READ/EXECUTE containment is added). A leading `~` expands to `$HOME`. You can also give a **per-target** `unveil` list to whitelist extra paths for just that target (e.g. a test that needs a system file). Global and per-target unveils aggregate.
+
+**Limitations.** Landlock rules are on *inodes*, so a path must exist when the rule is added — unveiling a not-yet-created leaf file is a no-op. Unveil a directory (or the parent of a to-be-created file) instead. And because rules are per-inode, deleting an unveiled path re-veils it. The write-containment model sidesteps the missing-output-file problem entirely: outputs under the build tree are covered by the cwd rule.
+
+**Fallback.** If landlock is unavailable (kernel < 5.13 or non-Linux), dhake prints a single warning (`landlock sandbox unavailable`) and runs the build **unsandboxed**, so the same buildfile works everywhere. This is what you get in a CI sandbox that blocks the landlock syscall.
 
 ### Example
 

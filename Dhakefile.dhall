@@ -10,6 +10,20 @@
 -- The `dhake.com` binary that results is itself a dhake executable: dhake
 -- builds dhake.  The committed dhake.com is the bootstrap that builds the
 -- first copy from source.
+--
+-- ─── optional landlock sandbox ────────────────────────────────────────────
+-- Add a top-level `sandbox = { enable, unveil }` field to run each recipe in
+-- a write-containment Landlock sandbox (see README "Sandboxing (Landlock)"):
+--
+--     , sandbox = { enable = True
+--                 , unveil = [ "rwc:~/.npm", "rwc:~/.cache", "rwc:~/.elm" ]
+--                 }
+--
+-- unveil entries are "perms:path" (default rwc); w/c are enforced in v1,
+-- r/x are parsed but inert. A leading ~ expands to $HOME. If landlock is
+-- unavailable (older kernel / non-Linux), dhake warns once and runs
+-- unsandboxed, so builds keep working everywhere.
+-- ──────────────────────────────────────────────────────────────────────────
 
 let Action =
       < Shell : Text

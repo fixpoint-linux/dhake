@@ -631,6 +631,55 @@ ok=1
 grep -qi "must be '<algorithm>:<hexdigest>'" /tmp/dhake-err31.txt || { echo "  bare hex error not found on stderr"; cat /tmp/dhake-err31.txt; ok=0; }
 check "bare-hex-rejected" "$ok"
 
+# ---- Case 32: --warn-hash-mismatch downgrades an output hash mismatch ----
+# With the flag, a wrong output hash must NOT abort the build: it prints a
+# warning to stderr that includes the ACTUAL hash (prefixed), the recipe runs,
+# and dhake exits 0. Without the flag the same buildfile must fail.
+cat > build_warn_out.dhall <<BUILDEOF
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, hash : Text }
+in  { targets = [ { mapKey = "out32.txt", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'hello' > out32.txt" > ], hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000" } } ], default = "out32.txt" }
+BUILDEOF
+
+rm -f out32.txt
+"$BIN" --warn-hash-mismatch -f build_warn_out.dhall > /tmp/dhake-out32.txt 2> /tmp/dhake-err32.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  --warn-hash-mismatch should exit 0, got $rc"; ok=0; }
+grep -qi "output hash mismatch" /tmp/dhake-err32.txt || { echo "  output hash mismatch warning not on stderr"; cat /tmp/dhake-err32.txt; ok=0; }
+# the warning must reveal the actual prefixed hash (sha256:<hex>) for updating
+grep -qE 'sha256:[0-9a-f]{64}' /tmp/dhake-err32.txt || { echo "  actual sha256:<hex> hash not printed in warning"; cat /tmp/dhake-err32.txt; ok=0; }
+[ -f out32.txt ] || { echo "  out32.txt not created (recipe should still run)"; ok=0; }
+check "warn-hash-mismatch-output" "$ok"
+
+# And the SAME buildfile WITHOUT the flag must still fail (mismatch stays fatal).
+rm -f out32.txt
+"$BIN" -f build_warn_out.dhall > /tmp/dhake-out32b.txt 2> /tmp/dhake-err32b.txt
+rc=$?
+ok=1
+[ "$rc" -ne 0 ] || { echo "  without flag expected non-zero exit, got $rc"; ok=0; }
+grep -qi "output hash mismatch" /tmp/dhake-err32b.txt || { echo "  mismatch error not on stderr without flag"; cat /tmp/dhake-err32b.txt; ok=0; }
+check "warn-hash-mismatch-output-still-fatal" "$ok"
+
+# ---- Case 33: --warn-hash-mismatch downgrades a dep hash mismatch ----
+# Same idea for depsHash: warning (with the actual hash), build continues.
+printf 'SRC-CONTENT\n' > warn33_input.txt
+cat > build_warn_dep.dhall <<BUILDEOF
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, hash : Text, depsHash : List { path : Text, hash : Text } }
+in  { targets = [ { mapKey = "out33.txt", mapValue = { deps = [ "warn33_input.txt" ], phony = False, recipe = [ < Shell = "cp warn33_input.txt out33.txt" > ], hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000", depsHash = [ { path = "warn33_input.txt", hash = "sha256:1111111111111111111111111111111111111111111111111111111111111111" } ] } } ], default = "out33.txt" }
+BUILDEOF
+
+rm -f out33.txt
+"$BIN" --warn-hash-mismatch -f build_warn_dep.dhall > /tmp/dhake-out33.txt 2> /tmp/dhake-err33.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  --warn-hash-mismatch (dep) should exit 0, got $rc"; ok=0; }
+grep -qi "dep hash mismatch" /tmp/dhake-err33.txt || { echo "  dep hash mismatch warning not on stderr"; cat /tmp/dhake-err33.txt; ok=0; }
+grep -qE 'sha256:[0-9a-f]{64}' /tmp/dhake-err33.txt || { echo "  actual sha256:<hex> hash not printed in dep warning"; cat /tmp/dhake-err33.txt; ok=0; }
+[ -f out33.txt ] || { echo "  out33.txt not created (recipe should still run)"; ok=0; }
+check "warn-hash-mismatch-dep" "$ok"
+
 echo
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

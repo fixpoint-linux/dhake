@@ -45,13 +45,14 @@ rebuilding from source needs the toolchain).
 ## Usage
 
 ```
-dhake [-f FILE] [-j N] [-n] [--list] [target ...]
+dhake [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [target ...]
 ```
 
 - `-f FILE` — buildfile to evaluate (default: `./Dhakefile.dhall`, else `./build.dhall`)
 - `-j N` — run up to N build jobs in parallel (default: 1, sequential). Stops scheduling new targets on first failure but lets already-running targets finish.
 - `-n` — dry run: print actions without running them
 - `--list` — list targets and exit
+- `--warn-hash-mismatch` — report verified-build hash mismatches as warnings (printing the actual hash) instead of failing; see [Verified builds](#verified-builds)
 - `target` — build named target(s); default is the buildfile's `default`
 
 Exit codes: `0` success; the failing recipe's exit code on a recipe failure
@@ -225,6 +226,22 @@ dhake: 'app' verified (sha256 abc123...)
 
 On any mismatch (output or dep), dhake exits with code 2 and prints a clear error
 identifying the target, the file, and the expected vs actual hashes.
+
+**Updating pinned hashes.** When a pinned hash becomes stale (e.g. after editing a
+source file or the toolchain output changes), a normal build fails. Pass
+`--warn-hash-mismatch` to instead downgrade every mismatch to a **warning** that
+prints the actual hash — in copy-pasteable `<algorithm>:<hexdigest>` form — and let
+the build succeed:
+
+```
+$ dhake --warn-hash-mismatch app
+dhake: warning: target 'app': output hash mismatch: expected sha256:old..., got sha256:new...
+dhake: 'app' verified (hash sha256:new...)
+```
+
+Copy the `sha256:new...` value into the buildfile's `hash` / `depsHash` fields and
+commit. `--warn-hash-mismatch` only relaxes *hash* verification — other errors
+(missing files, recipe failures) still abort the build.
 
 ### Example
 

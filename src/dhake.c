@@ -323,29 +323,58 @@ static DepHash *parse_dep_hash_list(Term *rec, const char *where, int *n_out) {
     return out;
 }
 
-/* Verify all dep hashes for a target. Dies on mismatch or missing file. */
+/* When --warn-hash-mismatch is given, a hash mismatch is reported as a warning
+ * (printing the actual hash so the buildfile can be updated) instead of aborting. */
+static bool warn_hash_mismatch = false;
+
+/* Human-readable name of a hash algorithm, for building "<algo>:<hex>" specs. */
+static const char *hash_algo_name(HashAlg alg) {
+    switch (alg) {
+    case HASH_SHA256: return "sha256";
+    }
+    return "?";
+}
+
+/* Verify all dep hashes for a target. Dies on mismatch (unless --warn-hash-mismatch).
+ * Missing file is always fatal. */
 static int verify_dep_hashes(Target *t) {
     for (int i = 0; i < t->ndep_hash; i++) {
         char got[65];
         if (!file_hash(&t->dep_hash[i].hash, t->dep_hash[i].path, got))
             die("target '%s': dep hash verification failed: file '%s' not found",
                 t->name, t->dep_hash[i].path);
-        if (strcmp(got, t->dep_hash[i].hash.hex))
-            die("target '%s': dep hash mismatch for '%s': expected %s, got %s",
-                t->name, t->dep_hash[i].path, t->dep_hash[i].hash.spec, got);
+        if (strcmp(got, t->dep_hash[i].hash.hex)) {
+            if (warn_hash_mismatch) {
+                fprintf(stderr, "dhake: warning: target '%s': dep hash mismatch for '%s': "
+                        "expected %s, got %s:%s\n",
+                        t->name, t->dep_hash[i].path, t->dep_hash[i].hash.spec,
+                        hash_algo_name(t->dep_hash[i].hash.alg), got);
+            } else {
+                die("target '%s': dep hash mismatch for '%s': expected %s, got %s",
+                    t->name, t->dep_hash[i].path, t->dep_hash[i].hash.spec, got);
+            }
+        }
     }
     return 0;
 }
 
-/* Verify output hash for a target. Dies on mismatch or missing file. */
+/* Verify output hash for a target. Dies on mismatch (unless --warn-hash-mismatch),
+ * in which case it returns 1 on mismatch. Missing file is always fatal. */
 static int verify_output_hash(Target *t) {
     char got[65];
     if (!file_hash(t->out_hash, t->name, got))
         die("target '%s': output hash verification failed: file '%s' not found",
             t->name, t->name);
-    if (strcmp(got, t->out_hash->hex))
+    if (strcmp(got, t->out_hash->hex)) {
+        if (warn_hash_mismatch) {
+            fprintf(stderr, "dhake: warning: target '%s': output hash mismatch: "
+                    "expected %s, got %s:%s\n",
+                    t->name, t->out_hash->spec, hash_algo_name(t->out_hash->alg), got);
+            return 1;
+        }
         die("target '%s': output hash mismatch: expected %s, got %s",
             t->name, t->out_hash->spec, got);
+    }
     return 0;
 }
 
@@ -1040,13 +1069,16 @@ static const char *default_buildfile(void) {
 static void usage(const char *argv0) {
     printf("dhake — a Make-like build tool driven by a Dhall buildfile\n\n");
     printf("Usage:\n");
-    printf("  %s [-f FILE] [-j N] [-n] [--list] [target ...]\n", argv0);
+    printf("  %s [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [target ...]\n", argv0);
     printf("  %s -h | --help\n\n", argv0);
     printf("Options:\n");
     printf("  -f FILE    buildfile to evaluate (default: ./Dhakefile.dhall, else ./build.dhall)\n");
     printf("  -j N       run up to N build jobs in parallel (default: 1, sequential)\n");
     printf("  -n         dry run: print the actions that would run, without running them\n");
     printf("  --list     list all targets and exit\n");
+    printf("  --warn-hash-mismatch\n");
+    printf("             report verified-build hash mismatches as warnings (printing the\n");
+    printf("             actual hash) instead of failing, so pinned hashes can be updated\n");
     printf("  target     build the named target(s); default: the buildfile's 'default'\n");
 }
 
@@ -1068,6 +1100,7 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(a, "-n") || !strcmp(a, "--dry-run")) { dry_run = true; }
         else if (!strcmp(a, "--list")) { want_list = true; }
+        else if (!strcmp(a, "--warn-hash-mismatch")) { warn_hash_mismatch = true; }
         else if (a[0] == '-') { die("unknown option '%s'", a); }
         else { if (nwanted == wanted_cap) { wanted_cap = wanted_cap ? wanted_cap * 2 : 4; wanted = realloc(wanted, (size_t)wanted_cap * sizeof(char *)); } wanted[nwanted++] = a; }
     }
@@ -1337,8 +1370,8 @@ int main(int argc, char **argv) {
             if (rc == 0) {
                 /* Verify output hash for successful non-phony targets */
                 if (completed->out_hash != NULL && !completed->phony) {
-                    verify_output_hash(completed);
-                    printf("dhake: '%s' verified (hash %s)\n", completed->name, completed->out_hash->spec);
+                    if (verify_output_hash(completed) == 0)
+                        printf("dhake: '%s' verified (hash %s)\n", completed->name, completed->out_hash->spec);
                 }
                 for (int i2 = 0; i2 < n; i2++) {
                     Target *dep = order[i2];

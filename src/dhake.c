@@ -88,6 +88,8 @@ typedef struct Target {
     /* sandbox unveil whitelist (per-target, "perms:path" entries) */
     char **unveil;
     int nunveil;
+    /* working directory for recipe execution (NULL = build root) */
+    char *cwd;
     /* verified builds */
     Hash *out_hash;        /* expected output hash (NULL = no check) */
     DepHash *dep_hash;    /* expected dep hashes */
@@ -656,6 +658,16 @@ static Target *map_target(Term *mapValue, const char *name) {
     }
     t->phony = rec_bool(mapValue, "phony", false, name);
     t->unveil = parse_unveil_list(mapValue, name, &t->nunveil);
+
+    /* optional cwd */
+    Term *cwdt = rec_get(mapValue, "cwd");
+    if (cwdt) {
+        if (cwdt->tag != TmText)
+            die("target '%s': 'cwd' must be Text", name);
+        t->cwd = term_text_cstr(cwdt);
+    } else {
+        t->cwd = NULL;
+    }
 
     /* verified builds: optional hash and depsHash */
     Term *hash_term = rec_get(mapValue, "hash");
@@ -2478,6 +2490,10 @@ int main(int argc, char **argv) {
             if (pid == 0) {
                 /* Child: sandbox (landlock) then run the full recipe, then _exit */
                 sandbox_child(b, t);
+                if (t->cwd && chdir(t->cwd) != 0) {
+                    fprintf(stderr, "dhake: target '%s': chdir('%s') failed: %s\n", t->name, t->cwd, strerror(errno));
+                    _exit(1);
+                }
                 int rc = 0;
                 for (Action *a = t->recipe; a; a = a->next) {
                     rc = run_action(a);

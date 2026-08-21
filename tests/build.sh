@@ -1492,6 +1492,67 @@ grep -q 'all --> link' /tmp/dhake-out-g2.txt || { echo "  all-->link edge not fo
 check "graph-mermaid-format" "$ok"
 rm -f build_graph.dhall source.c main.c
 
+# ---- Case C1: cwd-basic: build in subdirectory ----
+# Create sub/ with main.c
+mkdir -p sub
+write_file sub/main.c 'int main(void) { return 0; }'
+
+cat > build_cwd_basic.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, cwd : Text }
+in  { targets = [ { mapKey = "sub/app", mapValue = { deps = ["sub/main.c"], phony = False, recipe = [ < Shell = "cc -o app main.c" > ], cwd = "sub" } } ], default = "sub/app" }
+BUILDEOF
+
+# Build: recipe runs in sub/, so app lands at sub/app
+"$BIN" -f build_cwd_basic.dhall > /tmp/dhake-out-c1.txt 2> /tmp/dhake-err-c1.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -x ./sub/app ] || { echo "  sub/app binary not created"; ok=0; }
+# Rebuild: should be up-to-date (no cc re-invoked)
+"$BIN" -f build_cwd_basic.dhall > /tmp/dhake-out-c1b.txt 2> /tmp/dhake-err-c1b.txt
+rc=$?
+[ "$rc" -eq 0 ] || { echo "  expected exit 0 on rebuild, got $rc"; ok=0; }
+grep -q "'sub/app' is up to date" /tmp/dhake-out-c1b.txt || { echo "  up-to-date message not found"; ok=0; }
+grep -q 'cc -o app main.c' /tmp/dhake-out-c1b.txt && { echo "  cc should not have been invoked (incremental)"; ok=0; }
+check "cwd-basic" "$ok"
+rm -rf sub build_cwd_basic.dhall
+
+# ---- Case C2: cwd-hash: cwd with hash verification ----
+mkdir -p sub
+write_file sub/main.c 'int main(void) { return 0; }'
+
+HASH_CWD=$(printf '' | sha256sum | cut -d' ' -f1)  # empty file hash
+cat > build_cwd_hash.dhall <<BUILDEOF
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, hash : Text, cwd : Text }
+in  { targets = [ { mapKey = "sub/empty", mapValue = { deps = [], phony = False, recipe = [ < Shell = "touch empty" > ], hash = "sha256:${HASH_CWD}", cwd = "sub" } } ], default = "sub/empty" }
+BUILDEOF
+
+"$BIN" -f build_cwd_hash.dhall > /tmp/dhake-out-c2.txt 2> /tmp/dhake-err-c2.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f ./sub/empty ] || { echo "  sub/empty file not created"; ok=0; }
+grep -q "verified" /tmp/dhake-out-c2.txt || { echo "  'verified' not found in output"; ok=0; }
+check "cwd-hash" "$ok"
+rm -rf sub build_cwd_hash.dhall
+
+# ---- Case C3: cwd-chdir-fail: nonexistent cwd directory ----
+cat > build_cwd_fail.dhall <<BUILDEOF
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, cwd : Text }
+in  { targets = [ { mapKey = "fail", mapValue = { deps = [], phony = False, recipe = [ < Shell = "echo hello" > ], cwd = "nonexistent-dir" } } ], default = "fail" }
+BUILDEOF
+
+"$BIN" -f build_cwd_fail.dhall > /tmp/dhake-out-c3.txt 2> /tmp/dhake-err-c3.txt
+rc=$?
+ok=1
+[ "$rc" -ne 0 ] || { echo "  expected nonzero exit, got $rc"; ok=0; }
+grep -q "chdir.*failed" /tmp/dhake-err-c3.txt || { echo "  chdir error message not found on stderr"; ok=0; }
+check "cwd-chdir-fail" "$ok"
+rm -f build_cwd_fail.dhall
+
 echo
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

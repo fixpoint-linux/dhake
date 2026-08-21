@@ -92,6 +92,7 @@ let Target = { deps : List Text, phony : Bool, recipe : List Action
              , unveil : Optional (List Text)   -- per-target sandbox whitelist
              , hash : Optional Text        -- expected hash of output (verified builds)
              , depsHash : Optional (List { path : Text, hash : Text })
+             , cwd : Text                 -- working directory for recipe execution
              }
 in  { targets = List { mapKey : Text, mapValue : Target }
     , default : Text
@@ -116,6 +117,9 @@ Each target has:
   `Chmod` changes file permissions (mode is octal Text); `Echo` prints text to stdout;
   `Env` sets an environment variable (affects subsequent actions in the same recipe);
   `Run` executes a program directly via `execvp` (no shell) with the given argv list.
+- **`cwd`** — optional working directory for recipe execution. When set, the recipe
+  runs in that subdirectory (relative to the build root). Useful for building in
+  subdirectories without shell `cd` boilerplate.
 
 ### Recursive Mkdir / Rm
 

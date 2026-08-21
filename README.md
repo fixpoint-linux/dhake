@@ -65,8 +65,8 @@ A `Dhakefile.dhall` is a value of this shape:
 ```dhall
 let Action = < Shell : Text
              | Copy : { from : Text, to : Text }
-             | Mkdir : Text
-             | Rm : Text
+             | Mkdir : < Plain : Text | Parents : { path : Text, parents : Bool } >
+             | Rm : < Plain : Text | Recursive : { path : Text, recursive : Bool } >
              | Touch : Text
              | Move : { from : Text, to : Text }
              | Symlink : { from : Text, to : Text }
@@ -95,13 +95,38 @@ Each target has:
   `Env` sets an environment variable (affects subsequent actions in the same recipe);
   `Run` executes a program directly via `execvp` (no shell) with the given argv list.
 
+### Recursive Mkdir / Rm
+
+`Mkdir` with a bare `Text` creates a single directory level (legacy behaviour). To
+create missing parents (like `mkdir -p`) and to delete whole trees (like `rm -rf`),
+give the action a record payload with the relevant boolean flag — either the
+type-honest nested-union spelling:
+
+```dhall
+[ < Mkdir = < Parents = { path = "a/b/c", parents = True } > >
+, < Rm = < Recursive = { path = "dist", recursive = True } > >
+]
+```
+
+or the equivalent ergonomic plain record:
+
+```dhall
+[ < Mkdir = { path = "a/b/c", parents = True } >
+, < Rm = { path = "dist", recursive = True } >
+]
+```
+
+Without the flag the behaviour is unchanged: `Rm` only removes a single file or an
+empty directory (it fails on a non-empty directory rather than recursing), and
+`Mkdir` only creates one level.
+
 ### Example
 
 ```dhall
 let Action = < Shell : Text
              | Copy : { from : Text, to : Text }
-             | Mkdir : Text
-             | Rm : Text
+             | Mkdir : < Plain : Text | Parents : { path : Text, parents : Bool } >
+             | Rm : < Plain : Text | Recursive : { path : Text, recursive : Bool } >
              | Touch : Text
              | Move : { from : Text, to : Text }
              | Symlink : { from : Text, to : Text }

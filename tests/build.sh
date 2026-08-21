@@ -325,6 +325,79 @@ ok=1
 grep -q "/bin/echo hello world" /tmp/dhake-out17.txt || { echo "  run command not found"; ok=0; }
 check "action-run" "$ok"
 
+# ---- Case 18: Mkdir recursive (parents=True, type-honest nested union) ----
+cat > build_mkdir_rec.dhall <<'BUILDEOF'
+let Action = < Shell : Text | Mkdir : < Plain : Text | Parents : { path : Text, parents : Bool } > | Rm : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { targets = [ { mapKey = "m", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Mkdir = < Parents = { path = "a/b/c", parents = True } > > ] } } ], default = "m" }
+BUILDEOF
+
+"$BIN" -f build_mkdir_rec.dhall > /tmp/dhake-out18.txt 2> /tmp/dhake-err18.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -d a/b/c ] || { echo "  nested dir a/b/c not created"; ok=0; }
+grep -q 'mkdir -p a/b/c' /tmp/dhake-out18.txt || { echo "  'mkdir -p a/b/c' not echoed"; ok=0; }
+check "mkdir-recursive" "$ok"
+
+# ---- Case 19: Rm recursive (recursive=True, ergonomic plain record) ----
+# Build a small non-empty tree, then let dhake delete it recursively.
+mkdir -p tree/x/y && echo hi > tree/x/y/f.txt && echo hi > tree/z.txt
+cat > build_rm_rec.dhall <<'BUILDEOF'
+let Action = < Shell : Text | Rm : { path : Text, recursive : Bool } >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { targets = [ { mapKey = "r", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Rm = { path = "tree", recursive = True } > ] } } ], default = "r" }
+BUILDEOF
+
+"$BIN" -f build_rm_rec.dhall > /tmp/dhake-out19.txt 2> /tmp/dhake-err19.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ ! -e tree ] || { echo "  tree not fully removed"; ok=0; }
+grep -q 'rm -rf tree' /tmp/dhake-out19.txt || { echo "  'rm -rf tree' not echoed"; ok=0; }
+check "rm-recursive" "$ok"
+
+# ---- Case 20: Rm recursive on missing path is ignored (rm -rf) ----
+cat > build_rm_missing.dhall <<'BUILDEOF'
+let Action = < Shell : Text | Rm : { path : Text, recursive : Bool } >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { targets = [ { mapKey = "r", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Rm = { path = "does-not-exist", recursive = True } > ] } } ], default = "r" }
+BUILDEOF
+
+"$BIN" -f build_rm_missing.dhall > /tmp/dhake-out20.txt 2> /tmp/dhake-err20.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  rm -rf on missing path should be ignored, got $rc"; ok=0; }
+check "rm-recursive-missing" "$ok"
+
+# ---- Case 21: legacy bare-Text Mkdir/Rm still non-recursive ----
+# Bare Text Mkdir creates a single level and echoes plain 'mkdir'; bare Text Rm
+# on a NON-EMPTY directory must FAIL (remove() does not recurse).
+mkdir -p legacy_dir/sub && echo hi > legacy_dir/sub/f.txt
+cat > build_legacy.dhall <<'BUILDEOF'
+let Action = < Shell : Text | Copy : { from : Text, to : Text } | Mkdir : Text | Rm : Text | Touch : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in { targets =
+     [ { mapKey = "mk", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Mkdir = "solo" > ] } }
+     , { mapKey = "rmdir", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Rm = "legacy_dir" > ] } }
+     ], default = "mk" }
+BUILDEOF
+
+"$BIN" -f build_legacy.dhall mk > /tmp/dhake-out21a.txt 2> /tmp/dhake-err21a.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  bare Text Mkdir failed, got $rc"; ok=0; }
+[ -d solo ] || { echo "  single-level dir 'solo' not created"; ok=0; }
+grep -q 'mkdir solo' /tmp/dhake-out21a.txt || { echo "  'mkdir solo' not echoed (no -p)"; ok=0; }
+check "mkdir-legacy-text" "$ok"
+
+"$BIN" -f build_legacy.dhall rmdir > /tmp/dhake-out21b.txt 2> /tmp/dhake-err21b.txt
+rc=$?
+ok=1
+[ "$rc" -ne 0 ] || { echo "  bare Text Rm on non-empty dir should fail (non-recursive)"; ok=0; }
+[ -e legacy_dir ] || { echo "  legacy_dir should still exist (remove() does not recurse)"; ok=0; }
+check "rm-legacy-nonrecursive" "$ok"
+
 echo
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

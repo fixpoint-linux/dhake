@@ -14,8 +14,8 @@
 let Action =
       < Shell : Text
       | Copy : { from : Text, to : Text }
-      | Mkdir : Text
-      | Rm : Text
+      | Mkdir : < Plain : Text | Parents : { path : Text, parents : Bool } >
+      | Rm : < Plain : Text | Recursive : { path : Text, recursive : Bool } >
       | Touch : Text
       | Move : { from : Text, to : Text }
       | Symlink : { from : Text, to : Text }
@@ -92,10 +92,9 @@ in  { targets =
               { deps = [ "mfe-framework" ]
               , phony = True
               , recipe =
-                  [ < Shell = "/bin/rm -rf vendor/@mfe" >
-                  , < Shell =
-                        "/bin/mkdir -p vendor/@mfe/core vendor/@mfe/framework"
-                    >
+                  [ < Rm = < Recursive = { path = "vendor/@mfe", recursive = True } > >
+                  , < Mkdir = < Parents = { path = "vendor/@mfe/core", parents = True } > >
+                  , < Mkdir = < Parents = { path = "vendor/@mfe/framework", parents = True } > >
                   , < Shell =
                         "cp mfe-framework/packages/core/dist/*.js vendor/@mfe/core/"
                     >

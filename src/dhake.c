@@ -23,6 +23,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <errno.h>
+#include <string.h>
+#include <ftw.h>
 
 /* ------------------------------------------------------------------ */
 /* In-memory build plan                                                */
@@ -37,6 +39,7 @@ typedef struct Action {
     char *b;               /* copy-to / move-to / symlink-to / chmod-mode / env-value */
     char **av;             /* argv for Run (NULL for others) */
     int nav;              /* argc for Run (0 for others) */
+    bool recursive;        /* Mkdir: create missing parents (mkdir -p); Rm: delete tree (rm -rf) */
     struct Action *next;
 } Action;
 
@@ -171,6 +174,30 @@ static Field *union_selected(Term *u) {
     return NULL;
 }
 
+/* Resolve a Mkdir/Rm payload, which may be:
+ *   - a bare Text literal           -> non-recursive (legacy)
+ *   - a record { path, <flag> }     -> recursive per <flag>
+ *   - a nested single-alt union of the two (the type-honest Dhall spelling
+ *     < Plain : Text | <Flag> : { path, <flag> } >)
+ * Returns a strdup'd path and sets *recursive. Dies on malformed input. */
+static char *action_path(Term *v, const char *flag, bool *recursive, const char *target) {
+    *recursive = false;
+    if (!v) die("target '%s': Mkdir/Rm payload missing", target);
+    if (v->tag == TmUnionLit) {            /* nested < Plain | Flag > payload */
+        Field *f = union_selected(v);
+        if (!f) die("target '%s': malformed Mkdir/Rm payload", target);
+        v = f->value;
+    }
+    if (v->tag == TmText) return term_text_cstr(v);
+    if (v->tag == TmRecordLit) {
+        char *p = rec_need_text(v, "path", target);
+        *recursive = rec_bool(v, flag, false, target);
+        return p;
+    }
+    die("target '%s': Mkdir/Rm payload must be Text or a { path, %s } record", target, flag);
+    return NULL;
+}
+
 static Action *map_action(Term *u, const char *target) {
     if (!u || u->tag != TmUnionLit)
         die("target '%s': recipe element must be an Action union (< Tag = v >)", target);
@@ -190,12 +217,12 @@ static Action *map_action(Term *u, const char *target) {
         a->b = rec_need_text(sel->value, "to", target);
     } else if (!strcmp(tag, "Mkdir")) {
         a->kind = ACT_MKDIR;
-        a->a = term_text_cstr(sel->value);
-        if (!a->a) die("target '%s': < Mkdir = ... > value must be Text", target);
+        a->a = action_path(sel->value, "parents", &a->recursive, target);
+        if (!a->a) die("target '%s': < Mkdir = ... > value must be Text or a { path, parents } record", target);
     } else if (!strcmp(tag, "Rm")) {
         a->kind = ACT_RM;
-        a->a = term_text_cstr(sel->value);
-        if (!a->a) die("target '%s': < Rm = ... > value must be Text", target);
+        a->a = action_path(sel->value, "recursive", &a->recursive, target);
+        if (!a->a) die("target '%s': < Rm = ... > value must be Text or a { path, recursive } record", target);
     } else if (!strcmp(tag, "Touch")) {
         a->kind = ACT_TOUCH;
         a->a = term_text_cstr(sel->value);
@@ -449,6 +476,35 @@ static bool touch_file(const char *path) {
     return true;
 }
 
+/* mkdir -p: create leading parent directories, ignoring EEXIST. */
+static int mkdir_p(const char *path) {
+    char *buf = strdup(path);
+    if (!buf) return -1;
+    char *p = buf + (buf[0] == '/' ? 1 : 0);
+    for (; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(buf, 0755) != 0 && errno != EEXIST) { free(buf); return -1; }
+            *p = '/';
+        }
+    }
+    if (mkdir(buf, 0755) != 0 && errno != EEXIST) { free(buf); return -1; }
+    free(buf);
+    return 0;
+}
+
+static int rm_rf_cb(const char *path, const struct stat *st, int typeflag, struct FTW *ftw) {
+    (void)st; (void)typeflag; (void)ftw;
+    return remove(path);
+}
+
+/* rm -rf: recursively delete, ignoring missing paths. */
+static int rm_rf(const char *path) {
+    if (nftw(path, rm_rf_cb, 64, FTW_DEPTH | FTW_PHYS) != 0)
+        return (errno == ENOENT) ? 0 : -1;
+    return 0;
+}
+
 /* execute one action; returns exit code (0 = ok) */
 static int run_action(Action *a) {
     switch (a->kind) {
@@ -465,18 +521,18 @@ static int run_action(Action *a) {
         fflush(stdout);
         return copy_file(a->a, a->b) ? 0 : 1;
     case ACT_MKDIR: {
-        printf("mkdir %s\n", a->a);
+        printf(a->recursive ? "mkdir -p %s\n" : "mkdir %s\n", a->a);
         fflush(stdout);
-        if (mkdir(a->a, 0755) != 0 && errno != EEXIST) {
+        if ((a->recursive ? mkdir_p(a->a) : mkdir(a->a, 0755)) != 0 && errno != EEXIST) {
             fprintf(stderr, "dhake: mkdir: %s\n", strerror(errno));
             return 1;
         }
         return 0;
     }
     case ACT_RM:
-        printf("rm %s\n", a->a);
+        printf(a->recursive ? "rm -rf %s\n" : "rm %s\n", a->a);
         fflush(stdout);
-        if (remove(a->a) != 0 && errno != ENOENT) {
+        if ((a->recursive ? rm_rf(a->a) : remove(a->a)) != 0 && errno != ENOENT) {
             fprintf(stderr, "dhake: rm: %s\n", strerror(errno));
             return 1;
         }
@@ -561,8 +617,8 @@ static void print_action(Action *a) {
     switch (a->kind) {
     case ACT_SHELL: printf("%s\n", a->a); break;
     case ACT_COPY:  printf("cp %s %s\n", a->a, a->b); break;
-    case ACT_MKDIR: printf("mkdir %s\n", a->a); break;
-    case ACT_RM:    printf("rm %s\n", a->a); break;
+    case ACT_MKDIR: printf(a->recursive ? "mkdir -p %s\n" : "mkdir %s\n", a->a); break;
+    case ACT_RM:    printf(a->recursive ? "rm -rf %s\n" : "rm %s\n", a->a); break;
     case ACT_TOUCH: printf("touch %s\n", a->a); break;
     case ACT_MOVE:  printf("mv %s %s\n", a->a, a->b); break;
     case ACT_SYMLINK: printf("ln -s %s %s\n", a->a, a->b); break;

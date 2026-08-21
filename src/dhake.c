@@ -47,6 +47,11 @@ typedef struct Action {
     struct Action *next;
 } Action;
 
+typedef struct DepSha {
+    char *path;
+    char *sha256;
+} DepSha;
+
 typedef struct Target {
     char *name;
     bool phony;
@@ -56,6 +61,10 @@ typedef struct Target {
     /* sandbox unveil whitelist (per-target, "perms:path" entries) */
     char **unveil;
     int nunveil;
+    /* verified builds */
+    char *sha256;          /* expected output hash (NULL = no check) */
+    DepSha *dep_sha;      /* expected dep hashes */
+    int ndep_sha;         /* number of dep hashes */
     /* resolved graph state */
     struct Target **dep_targets;   /* resolved Target* per dep */
     int state;             /* 0 unvisited, 1 visiting (cycle), 2 done */
@@ -109,6 +118,17 @@ static char *read_file(const char *path, size_t *len_out) {
     fclose(f);
     if (len_out) *len_out = len;
     return buf;
+}
+
+/* Compute SHA-256 hex digest of a file. out must be a 65-byte buffer (64 hex chars + NUL).
+ * Returns true on success, false on file error. */
+static bool file_sha256_hex(const char *path, char out[65]) {
+    size_t len = 0;
+    char *data = read_file(path, &len);
+    if (!data) return false;
+    sha256_hex(data, len, out);
+    free(data);
+    return true;
 }
 
 static void print_dhall_error(const DhallError *e) {
@@ -194,6 +214,59 @@ static char **parse_unveil_list(Term *rec, const char *where, int *n_out) {
     }
     *n_out = n;
     return out;
+}
+
+/* Parse an optional `depsSha256 : List { path : Text, sha256 : Text }` field.
+ * Returns NULL (n_out=0) when the field is absent. Dies on shape errors. */
+static DepSha *parse_dep_sha_list(Term *rec, const char *where, int *n_out) {
+    *n_out = 0;
+    Term *list = rec_get(rec, "depsSha256");
+    if (!list) return NULL;
+    if (list->tag != TmNil && list->tag != TmCons)
+        die("%s: 'depsSha256' must be a List { path : Text, sha256 : Text }", where);
+    int n = list_length(list);
+    if (n == 0) return NULL;
+    DepSha *out = calloc((size_t)n, sizeof(DepSha));
+    if (!out) die("out of memory");
+    int i = 0;
+    for (Term *p = list; p && p->tag == TmCons; p = p->as.cons.tail) {
+        Term *item = p->as.cons.head;
+        if (!item || item->tag != TmRecordLit)
+            die("%s: depsSha256 element must be a { path, sha256 } record", where);
+        char *path = rec_need_text(item, "path", where);
+        char *sha256 = rec_need_text(item, "sha256", where);
+        out[i].path = path;
+        out[i].sha256 = sha256;
+        i++;
+    }
+    *n_out = n;
+    return out;
+}
+
+/* Verify all dep hashes for a target. Dies on mismatch or missing file. */
+static int verify_dep_hashes(Target *t) {
+    for (int i = 0; i < t->ndep_sha; i++) {
+        char got[65];
+        if (!file_sha256_hex(t->dep_sha[i].path, got))
+            die("target '%s': dep hash verification failed: file '%s' not found",
+                t->name, t->dep_sha[i].path);
+        if (strcmp(got, t->dep_sha[i].sha256))
+            die("target '%s': dep hash mismatch for '%s': expected %s, got %s",
+                t->name, t->dep_sha[i].path, t->dep_sha[i].sha256, got);
+    }
+    return 0;
+}
+
+/* Verify output hash for a target. Dies on mismatch or missing file. */
+static int verify_output_hash(Target *t) {
+    char got[65];
+    if (!file_sha256_hex(t->name, got))
+        die("target '%s': output hash verification failed: file '%s' not found",
+            t->name, t->name);
+    if (strcmp(got, t->sha256))
+        die("target '%s': output hash mismatch: expected %s, got %s",
+            t->name, t->sha256, got);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -331,6 +404,15 @@ static Target *map_target(Term *mapValue, const char *name) {
     }
     t->phony = rec_bool(mapValue, "phony", false, name);
     t->unveil = parse_unveil_list(mapValue, name, &t->nunveil);
+
+    /* verified builds: optional sha256 and depsSha256 */
+    Term *sha256_term = rec_get(mapValue, "sha256");
+    if (sha256_term) {
+        if (sha256_term->tag != TmText)
+            die("target '%s': 'sha256' must be Text", name);
+        t->sha256 = term_text_cstr(sha256_term);
+    }
+    t->dep_sha = parse_dep_sha_list(mapValue, name, &t->ndep_sha);
 
     Term *recipe = rec_get(mapValue, "recipe");
     if (recipe && recipe->tag != TmNil) {
@@ -1037,7 +1119,12 @@ int main(int argc, char **argv) {
             }
             t->dirty = dirty;
 
+            /* Verify dep hashes at launch time (integrity gate on inputs) */
+            if (t->ndep_sha > 0) verify_dep_hashes(t);
+
             if (!dirty) {
+                /* Verify output hash for up-to-date non-phony targets */
+                if (t->sha256 != NULL && !t->phony) verify_output_hash(t);
                 printf("dhake: '%s' is up to date\n", t->name);
                 /* mark done: decrement deps_pending for dependents */
                 for (int i2 = 0; i2 < n; i2++) {
@@ -1165,6 +1252,11 @@ int main(int argc, char **argv) {
              * Only a SUCCESSFUL target unblocks its dependents — a failed one
              * must not schedule them (they cannot build on a broken dep). */
             if (rc == 0) {
+                /* Verify output hash for successful non-phony targets */
+                if (completed->sha256 != NULL && !completed->phony) {
+                    verify_output_hash(completed);
+                    printf("dhake: '%s' verified (sha256 %s)\n", completed->name, completed->sha256);
+                }
                 for (int i2 = 0; i2 < n; i2++) {
                     Target *dep = order[i2];
                     if (dep->state != 1) continue;

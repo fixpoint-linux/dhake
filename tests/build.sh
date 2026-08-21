@@ -501,6 +501,106 @@ if grep -q '^x$' /tmp/dhake-out25.txt; then echo "  'x' leaked to stdout instead
 [ "$(cat redirect_target.txt 2>/dev/null)" = "x" ] || { echo "  redirect_target.txt should contain exactly 'x'"; ok=0; }
 check "shell-redirect-scoped-stdout" "$ok"
 
+# ---- Case 26: Output hash correct ----
+# A non-phony target produces a file with a declared sha256.
+# First run: build succeeds + verified message. Second run: up-to-date.
+HASH26=$(printf 'hello' | sha256sum | cut -d' ' -f1)
+cat > build_output_hash_correct.dhall <<BUILDEOF
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, sha256 : Text, depsSha256 : List { path : Text, sha256 : Text } }
+in  { targets = [ { mapKey = "out26.txt", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'hello' > out26.txt" > ], sha256 = "${HASH26}" } } ], default = "out26.txt" }
+BUILDEOF
+
+rm -f out26.txt
+"$BIN" -f build_output_hash_correct.dhall > /tmp/dhake-out26.txt 2> /tmp/dhake-err26.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f out26.txt ] || { echo "  out26.txt not created"; ok=0; }
+grep -q "verified" /tmp/dhake-out26.txt || { echo "  'verified' not found in output"; ok=0; }
+check "output-hash-correct" "$ok"
+
+# Second run should be up-to-date
+"$BIN" -f build_output_hash_correct.dhall > /tmp/dhake-out26b.txt 2> /tmp/dhake-err26b.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+grep -q "is up to date" /tmp/dhake-out26b.txt || { echo "  'is up to date' not found"; ok=0; }
+check "output-hash-correct-up-to-date" "$ok"
+
+# ---- Case 27: Output hash wrong ----
+# Same as case 26 but with a wrong sha256. Build must fail.
+cat > build_output_hash_wrong.dhall <<BUILDEOF
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, sha256 : Text, depsSha256 : List { path : Text, sha256 : Text } }
+in  { targets = [ { mapKey = "out27.txt", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'hello' > out27.txt" > ], sha256 = "0000000000000000000000000000000000000000000000000000000000000000" } } ], default = "out27.txt" }
+BUILDEOF
+
+rm -f out27.txt
+"$BIN" -f build_output_hash_wrong.dhall > /tmp/dhake-out27.txt 2> /tmp/dhake-err27.txt
+rc=$?
+ok=1
+[ "$rc" -ne 0 ] || { echo "  expected non-zero exit, got $rc"; ok=0; }
+grep -qi "hash mismatch" /tmp/dhake-err27.txt || { echo "  hash mismatch error not found on stderr"; cat /tmp/dhake-err27.txt; ok=0; }
+check "output-hash-wrong" "$ok"
+
+# ---- Case 28: Dep hash correct then tampered ----
+# A target with depsSha256 verifying its source dep. First run succeeds.
+# Then tamper the dep file -> second run fails with dep hash mismatch.
+HASH28=$(printf 'input28' | sha256sum | cut -d' ' -f1)
+cat > build_dep_hash.dhall <<BUILDEOF
+let Action = < Shell : Text | Copy : { from : Text, to : Text } >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, sha256 : Text, depsSha256 : List { path : Text, sha256 : Text } }
+in  { targets = [ { mapKey = "depout28.txt", mapValue = { deps = ["input28.txt"], phony = False, recipe = [ < Copy = { from = "input28.txt", to = "depout28.txt" } > ], depsSha256 = [ { path = "input28.txt", sha256 = "${HASH28}" } ] } } ], default = "depout28.txt" }
+BUILDEOF
+
+rm -f input28.txt depout28.txt
+printf 'input28' > input28.txt
+"$BIN" -f build_dep_hash.dhall > /tmp/dhake-out28a.txt 2> /tmp/dhake-err28a.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f depout28.txt ] || { echo "  depout28.txt not created"; ok=0; }
+check "dep-hash-correct" "$ok"
+
+# Tamper the dep file
+printf 'tampered28' > input28.txt
+"$BIN" -f build_dep_hash.dhall > /tmp/dhake-out28b.txt 2> /tmp/dhake-err28b.txt
+rc=$?
+ok=1
+[ "$rc" -ne 0 ] || { echo "  expected non-zero exit, got $rc"; ok=0; }
+grep -qi "dep hash mismatch" /tmp/dhake-err28b.txt || { echo "  dep hash mismatch error not found on stderr"; ok=0; }
+check "dep-hash-tampered" "$ok"
+
+# ---- Case 29: Output tampered but up-to-date by mtime ----
+# Build with correct hash, then tamper the output file and set its mtime
+# to the past so it's "up to date" by mtime. Verification should catch it.
+HASH29=$(printf 'hello29' | sha256sum | cut -d' ' -f1)
+cat > build_output_tampered.dhall <<BUILDEOF
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, sha256 : Text, depsSha256 : List { path : Text, sha256 : Text } }
+in  { targets = [ { mapKey = "out29.txt", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'hello29' > out29.txt" > ], sha256 = "${HASH29}" } } ], default = "out29.txt" }
+BUILDEOF
+
+rm -f out29.txt
+"$BIN" -f build_output_tampered.dhall > /tmp/dhake-out29a.txt 2> /tmp/dhake-err29a.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f out29.txt ] || { echo "  out29.txt not created"; ok=0; }
+check "output-tampered-build" "$ok"
+
+# Tamper the output file
+printf 'TAMPERED29' > out29.txt
+# Try to set mtime to the past (may fail in sandbox, but we try)
+touch -d '2000-01-01' out29.txt 2>/dev/null || true
+"$BIN" -f build_output_tampered.dhall > /tmp/dhake-out29b.txt 2> /tmp/dhake-err29b.txt
+rc=$?
+ok=1
+[ "$rc" -ne 0 ] || { echo "  expected non-zero exit, got $rc"; ok=0; }
+grep -qi "hash mismatch" /tmp/dhake-err29b.txt || { echo "  hash mismatch error not found on stderr"; cat /tmp/dhake-err29b.txt; ok=0; }
+check "output-tampered-up-to-date" "$ok"
+
 echo
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

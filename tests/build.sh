@@ -1231,6 +1231,94 @@ rm -f watch_src.txt watch_out.txt build_watch.dhall
 
 rm -f netprobe.c netprobe build_denyNetwork.dhall build_denyNetwork_unix.dhall build_no_denyNetwork.dhall build_denyNetwork_failclosed.dhall
 
+# ---- Explain mode tests ----
+
+# ---- Case E1: explain-missing-output ----
+# Target with no output file -> --explain reports needs rebuild
+cat > build_explain_e1.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets = [ { mapKey = "explain_e1.txt", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'e1' > explain_e1.txt" > ] } } ], default = "explain_e1.txt" }
+BUILDEOF
+
+rm -f explain_e1.txt
+"$BIN" -f build_explain_e1.dhall --explain > /tmp/dhake-out-e1.txt 2> /tmp/dhake-err-e1.txt
+rc=$?
+ok=1
+[ "$rc" -ne 0 ] || { echo "  explain expected non-zero exit, got $rc"; ok=0; }
+grep -q "needs rebuild" /tmp/dhake-out-e1.txt || { echo "  'needs rebuild' not found in explain output"; cat /tmp/dhake-out-e1.txt; ok=0; }
+grep -q "does not exist" /tmp/dhake-out-e1.txt || { echo "  'does not exist' not found in explain output"; cat /tmp/dhake-out-e1.txt; ok=0; }
+[ ! -f explain_e1.txt ] || { echo "  explain_e1.txt should not exist (no recipe ran)"; ok=0; }
+check "explain-missing-output" "$ok"
+rm -f explain_e1.txt build_explain_e1.dhall
+
+# ---- Case E2: explain-clean-up-to-date ----
+# Build first, then --explain reports up to date
+cat > build_explain_e2.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets = [ { mapKey = "explain_e2.txt", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'e2' > explain_e2.txt" > ] } } ], default = "explain_e2.txt" }
+BUILDEOF
+
+rm -f explain_e2.txt
+"$BIN" -f build_explain_e2.dhall > /tmp/dhake-out-e2a.txt 2> /tmp/dhake-err-e2a.txt
+rc=$?
+[ "$rc" -eq 0 ] || { echo "  initial build expected exit 0, got $rc"; ok=0; }
+# Now explain should report up to date
+"$BIN" -f build_explain_e2.dhall --explain > /tmp/dhake-out-e2b.txt 2> /tmp/dhake-err-e2b.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  explain expected exit 0, got $rc"; ok=0; }
+grep -q "is up to date" /tmp/dhake-out-e2b.txt || { echo "  'is up to date' not found in explain output"; cat /tmp/dhake-out-e2b.txt; ok=0; }
+check "explain-clean-up-to-date" "$ok"
+rm -f explain_e2.txt build_explain_e2.dhall
+
+# ---- Case E3: explain-source-newer ----
+# Build, then touch source dep -> explain reports newer reason
+cat > explain_e3_src.c <<'EOF'
+#include <stdio.h>
+int main(void) { return puts("e3"); }
+EOF
+cat > build_explain_e3.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets = [ { mapKey = "explain_e3", mapValue = { deps = ["explain_e3_src.c"], phony = False, recipe = [ < Shell = "cc -o explain_e3 explain_e3_src.c" > ] } } ], default = "explain_e3" }
+BUILDEOF
+
+rm -f explain_e3 explain_e3_src.o
+"$BIN" -f build_explain_e3.dhall > /tmp/dhake-out-e3a.txt 2> /tmp/dhake-err-e3a.txt
+rc=$?
+[ "$rc" -eq 0 ] || { echo "  initial build expected exit 0, got $rc"; ok=0; }
+# Touch source to make it newer
+sleep 0.1
+touch explain_e3_src.c
+# Explain should report needs rebuild with newer reason
+"$BIN" -f build_explain_e3.dhall --explain > /tmp/dhake-out-e3b.txt 2> /tmp/dhake-err-e3b.txt
+rc=$?
+ok=1
+[ "$rc" -ne 0 ] || { echo "  explain expected non-zero exit, got $rc"; ok=0; }
+grep -q "needs rebuild" /tmp/dhake-out-e3b.txt || { echo "  'needs rebuild' not found in explain output"; cat /tmp/dhake-out-e3b.txt; ok=0; }
+grep -qE "(newer|hash)" /tmp/dhake-out-e3b.txt || { echo "  'newer' or 'hash' reason not found in explain output"; cat /tmp/dhake-out-e3b.txt; ok=0; }
+check "explain-source-newer" "$ok"
+rm -f explain_e3 explain_e3_src.c explain_e3_src.o build_explain_e3.dhall
+
+# ---- Case E4: explain-phony-target ----
+# Phony target -> explain reports phony reason
+cat > build_explain_e4.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets = [ { mapKey = "explain_e4_phony", mapValue = { deps = [], phony = True, recipe = [ < Shell = "echo phony ran" > ] } } ], default = "explain_e4_phony" }
+BUILDEOF
+
+"$BIN" -f build_explain_e4.dhall --explain > /tmp/dhake-out-e4.txt 2> /tmp/dhake-err-e4.txt
+rc=$?
+ok=1
+[ "$rc" -ne 0 ] || { echo "  explain expected non-zero exit for phony, got $rc"; ok=0; }
+grep -q "needs rebuild" /tmp/dhake-out-e4.txt || { echo "  'needs rebuild' not found in explain output"; cat /tmp/dhake-out-e4.txt; ok=0; }
+grep -q "phony target" /tmp/dhake-out-e4.txt || { echo "  'phony target' not found in explain output"; cat /tmp/dhake-out-e4.txt; ok=0; }
+check "explain-phony-target" "$ok"
+rm -f build_explain_e4.dhall
+
 echo
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

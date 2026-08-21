@@ -357,6 +357,9 @@ static bool hash_uptodate = false;
 /* When --watch is given, watch source files and rebuild on changes. */
 static bool watch_mode = false;
 
+/* When --explain / --why is given, explain why targets need rebuilding. */
+static bool want_explain = false;
+
 /* Human-readable name of a hash algorithm, for building "<algo>:<hex>" specs. */
 static const char *hash_algo_name(HashAlg alg) {
     switch (alg) {
@@ -1785,10 +1788,147 @@ static int run_verify(Target **order, int n) {
     return failed;
 }
 
+/* Explain why a single target is dirty or clean. Fills `reason` (caller buffer,
+ * `cap` bytes) with a human-readable reason if dirty. Returns 1 if dirty, 0 if
+ * clean. Mirrors the dirty logic in hash_uptodate_dirty() and the build launch
+ * block. */
+static bool target_dirty_explain(Target *t, char *reason, size_t cap) {
+    if (t->phony) {
+        snprintf(reason, cap, "phony target (always runs)");
+        return true;
+    }
+
+    /* Try content-addressed path first */
+    int hash_result = hash_uptodate_dirty(t);
+    if (hash_result >= 0) {
+        if (hash_result == 0) {
+            reason[0] = '\0';
+            return false;  /* clean */
+        }
+        /* hash_result == 1: dirty. Re-derive the reason from content-addressed checks. */
+        bool texists = false;
+        (void)file_mtime_ns(t->name, &texists);
+        if (!texists) {
+            snprintf(reason, cap, "output \"%s\" does not exist", t->name);
+            return true;
+        }
+        /* Check target deps */
+        for (int j = 0; j < t->ndeps; j++) {
+            Target *d = t->dep_targets[j];
+            if (d && d->dirty) {
+                snprintf(reason, cap, "\"%s\" needs rebuild", d->name);
+                return true;
+            }
+        }
+        /* Check pinned source deps */
+        long long tm = file_mtime_ns(t->name, NULL);
+        for (int j = 0; j < t->ndeps; j++) {
+            Target *d = t->dep_targets[j];
+            if (d) continue;
+            const char *path = t->deps[j];
+            const DepHash *pin = NULL;
+            for (int k = 0; k < t->ndep_hash; k++) {
+                if (!strcmp(t->dep_hash[k].path, path)) { pin = &t->dep_hash[k]; break; }
+            }
+            if (pin) {
+                char got[65];
+                if (!file_hash(&pin->hash, path, got)) {
+                    snprintf(reason, cap, "input \"%s\" does not exist", path);
+                    return true;
+                }
+                if (strcmp(got, pin->hash.hex)) {
+                    snprintf(reason, cap, "input \"%s\" hash changed (expected %s, got %s:%s)",
+                             path, pin->hash.spec, hash_algo_name(pin->hash.alg), got);
+                    return true;
+                }
+            } else {
+                /* Unpinned source dep: mtime fallback */
+                bool sexists = false;
+                long long sm = file_mtime_ns(path, &sexists);
+                if (!sexists) {
+                    snprintf(reason, cap, "input \"%s\" does not exist", path);
+                    return true;
+                }
+                if (sm > tm) {
+                    snprintf(reason, cap, "input \"%s\" is newer than \"%s\"", path, t->name);
+                    return true;
+                }
+            }
+        }
+        /* Fallback for content path dirty but no specific reason found */
+        snprintf(reason, cap, "input content changed");
+        return true;
+    }
+
+    /* mtime path */
+    bool texists = false;
+    long long tm = file_mtime_ns(t->name, &texists);
+    if (!texists) {
+        snprintf(reason, cap, "output \"%s\" does not exist", t->name);
+        return true;
+    }
+
+    for (int j = 0; j < t->ndeps; j++) {
+        Target *d = t->dep_targets[j];
+        if (d) {
+            if (d->dirty) {
+                snprintf(reason, cap, "\"%s\" needs rebuild", d->name);
+                return true;
+            }
+            bool dexists = false;
+            long long dm = file_mtime_ns(d->name, &dexists);
+            if (!dexists) {
+                snprintf(reason, cap, "dependency \"%s\" does not exist", d->name);
+                return true;
+            }
+            if (dm > tm) {
+                snprintf(reason, cap, "\"%s\" is newer than \"%s\"", d->name, t->name);
+                return true;
+            }
+        } else {
+            bool sexists = false;
+            long long sm = file_mtime_ns(t->deps[j], &sexists);
+            if (!sexists) {
+                snprintf(reason, cap, "input \"%s\" does not exist", t->deps[j]);
+                return true;
+            }
+            if (sm > tm) {
+                snprintf(reason, cap, "input \"%s\" is newer than \"%s\"", t->deps[j], t->name);
+                return true;
+            }
+        }
+    }
+
+    reason[0] = '\0';
+    return false;  /* clean */
+}
+
+/* Explain why each target in the requested subgraph is dirty or clean.
+ * Returns the count of dirty targets (nonzero exit code if any). */
+static int run_explain(Target **order, int n) {
+    int dirty_count = 0;
+    for (int i = 0; i < n; i++) {
+        Target *t = order[i];
+        if (t->state != 1) continue;  /* only requested subgraph */
+
+        char reason[512];
+        bool dirty = target_dirty_explain(t, reason, sizeof(reason));
+        t->dirty = dirty;
+
+        if (dirty) {
+            printf("dhake: '%s' needs rebuild: %s\n", t->name, reason);
+            dirty_count++;
+        } else {
+            printf("dhake: '%s' is up to date\n", t->name);
+        }
+    }
+    return dirty_count;
+}
+
 static void usage(const char *argv0) {
     printf("dhake — a Make-like build tool driven by a Dhall buildfile\n\n");
     printf("Usage:\n");
-    printf("  %s [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--verify|--check] [--lock[=FILE]] [--hash-uptodate|--content-addressed] [--watch|-w] [target ...]\n", argv0);
+    printf("  %s [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--verify|--check] [--lock[=FILE]] [--hash-uptodate|--content-addressed] [--watch|-w] [--explain|--why] [target ...]\n", argv0);
     printf("  %s -h | --help\n\n", argv0);
     printf("Options:\n");
     printf("  -f FILE    buildfile to evaluate (default: ./Dhakefile.dhall, else ./build.dhall)\n");
@@ -1813,6 +1953,9 @@ static void usage(const char *argv0) {
     printf("  --watch / -w\n");
     printf("             rebuild and watch the requested targets' source-file dependencies;\n");
     printf("             on any change, rebuild (dev-loop); uses Linux inotify\n");
+    printf("  --explain / --why\n");
+    printf("             explain why each target in the requested subgraph needs rebuilding\n");
+    printf("             (or is up to date); pure diagnostic, does not run recipes\n");
     printf("  target     build the named target(s); default: the buildfile's 'default'\n");
 }
 
@@ -1840,6 +1983,7 @@ int main(int argc, char **argv) {
         else if (!strncmp(a, "--lock=", 7)) { lock_path = a + 7; }
         else if (!strcmp(a, "--hash-uptodate") || !strcmp(a, "--content-addressed")) { hash_uptodate = true; }
         else if (!strcmp(a, "--watch") || !strcmp(a, "-w")) { watch_mode = true; }
+        else if (!strcmp(a, "--explain") || !strcmp(a, "--why")) { want_explain = true; }
         else if (a[0] == '-') { die("unknown option '%s'", a); }
         else { if (nwanted == wanted_cap) { wanted_cap = wanted_cap ? wanted_cap * 2 : 4; wanted = realloc(wanted, (size_t)wanted_cap * sizeof(char *)); } wanted[nwanted++] = a; }
     }
@@ -1924,6 +2068,12 @@ int main(int argc, char **argv) {
         int vrc = run_verify(order, n);
         free(roots); free(order); free((void *)wanted);
         return vrc;
+    }
+
+    if (want_explain) {
+        int ec = run_explain(order, n);
+        free(roots); free(order); free((void *)wanted);
+        return ec ? 1 : 0;
     }
 
     /* For parallel scheduling, we need to compute dirty at launch time.

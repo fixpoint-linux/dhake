@@ -121,6 +121,64 @@ static Target *find_target(Build *b, const char *name);  /* fwd decl (defined la
 /* Small helpers                                                       */
 /* ------------------------------------------------------------------ */
 
+/* --define KEY=VALUE support: inject env vars for buildfile evaluation */
+typedef struct {
+    char *key;
+    char *value;
+    char *saved_value;  /* NULL means was unset before */
+} DefineEntry;
+
+static DefineEntry *defines = NULL;
+static int ndefines = 0;
+static int defines_cap = 0;
+
+static void apply_defines(void) {
+    for (int i = 0; i < ndefines; i++) {
+        DefineEntry *d = &defines[i];
+        d->saved_value = getenv(d->key);
+        if (d->saved_value) {
+            d->saved_value = strdup(d->saved_value);
+        }
+        setenv(d->key, d->value, 1);
+    }
+}
+
+static void restore_defines(void) {
+    for (int i = ndefines - 1; i >= 0; i--) {
+        DefineEntry *d = &defines[i];
+        if (d->saved_value) {
+            setenv(d->key, d->saved_value, 1);
+            free(d->saved_value);
+            d->saved_value = NULL;
+        } else {
+            unsetenv(d->key);
+        }
+    }
+}
+
+static void add_define(const char *key, const char *value) {
+    if (ndefines == defines_cap) {
+        defines_cap = defines_cap ? defines_cap * 2 : 4;
+        defines = realloc(defines, (size_t)defines_cap * sizeof(DefineEntry));
+    }
+    DefineEntry *d = &defines[ndefines++];
+    d->key = strdup(key);
+    d->value = strdup(value);
+    d->saved_value = NULL;
+}
+
+static void free_defines(void) {
+    for (int i = 0; i < ndefines; i++) {
+        free(defines[i].key);
+        free(defines[i].value);
+        free(defines[i].saved_value);
+    }
+    free(defines);
+    defines = NULL;
+    ndefines = 0;
+    defines_cap = 0;
+}
+
 static void die(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -1945,7 +2003,7 @@ static int run_explain(Target **order, int n) {
 static void usage(const char *argv0) {
     printf("dhake — a Make-like build tool driven by a Dhall buildfile\n\n");
     printf("Usage:\n");
-    printf("  %s [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--verify|--check] [--lock[=FILE]] [--hash-uptodate|--content-addressed] [--watch|-w] [--explain|--why] [--quiet|-s] [target ...]\n", argv0);
+    printf("  %s [-f FILE] [-j N] [-n] [-D KEY=VALUE|--define KEY=VALUE] [--list] [--warn-hash-mismatch] [--verify|--check] [--lock[=FILE]] [--hash-uptodate|--content-addressed] [--watch|-w] [--explain|--why] [--quiet|-s] [target ...]\n", argv0);
     printf("  %s -h | --help\n\n", argv0);
     printf("Options:\n");
     printf("  -f FILE    buildfile to evaluate (default: ./Dhakefile.dhall, else ./build.dhall)\n");
@@ -1976,6 +2034,10 @@ static void usage(const char *argv0) {
     printf("  --quiet / -s\n");
     printf("             suppress per-recipe command echo (summary lines and errors\n");
     printf("             are still shown)\n");
+    printf("  -D KEY=VALUE / --define KEY=VALUE\n");
+    printf("             inject KEY=VALUE into the buildfile evaluation environment,\n");
+    printf("             making it available to env: imports (e.g. env:CC). Multiple\n");
+    printf("             --define options accumulate; scoped to evaluation only\n");
     printf("  target     build the named target(s); default: the buildfile's 'default'\n");
 }
 
@@ -1996,6 +2058,20 @@ int main(int argc, char **argv) {
             if (jobs < 1) die("-j must be at least 1"); 
         }
         else if (!strcmp(a, "-n") || !strcmp(a, "--dry-run")) { dry_run = true; }
+        else if (!strcmp(a, "-D") || !strcmp(a, "--define")) {
+            if (i + 1 >= argc) die("--define requires KEY=VALUE");
+            const char *def = argv[++i];
+            const char *eq = strchr(def, '=');
+            if (!eq || eq == def) die("--define requires KEY=VALUE");
+            size_t key_len = (size_t)(eq - def);
+            if (key_len == 0) die("--define requires non-empty key");
+            char *key = malloc(key_len + 1);
+            memcpy(key, def, key_len);
+            key[key_len] = '\0';
+            const char *value = eq + 1;
+            add_define(key, value);
+            free(key);
+        }
         else if (!strcmp(a, "--list")) { want_list = true; }
         else if (!strcmp(a, "--warn-hash-mismatch")) { warn_hash_mismatch = true; }
         else if (!strcmp(a, "--verify") || !strcmp(a, "--check")) { want_verify = true; }
@@ -2010,7 +2086,9 @@ int main(int argc, char **argv) {
     }
 
     if (want_list) {
+        apply_defines();
         Term *root = eval_buildfile(buildfile);
+        restore_defines();
         Build *b = build_plan(root);
         for (Target *t = b->targets; t; t = t->next)
             printf("%s%s\n", t->name,
@@ -2021,7 +2099,9 @@ int main(int argc, char **argv) {
     int failed;
     for (;;) {
         failed = 0;
+        apply_defines();
         Term *root = eval_buildfile(buildfile);
+        restore_defines();
         Build *b = build_plan(root);
 
         /* probe landlock ABI (only when sandboxing is requested) */
@@ -2375,5 +2455,6 @@ int main(int argc, char **argv) {
     }
 
     free((void *)wanted);
+    free_defines();
     return failed;
 }

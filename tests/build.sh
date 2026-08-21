@@ -1380,6 +1380,58 @@ grep -q "building" /tmp/dhake-out-q3.txt || { echo "  'building' summary not fou
 check "quiet-alias" "$ok"
 rm -f build_quiet_q3.dhall quiet_a.txt
 
+# ---- Case D1: define-injects-env-import ----
+cat > build_define_d1.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets = [ { mapKey = "define_d1", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Shell = "printf '%s' ${env:CC} > cc.txt" > ] } } ], default = "define_d1" }
+BUILDEOF
+
+"$BIN" -f build_define_d1.dhall --define CC=gcc > /tmp/dhake-out-d1.txt 2> /tmp/dhake-err-d1.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f cc.txt ] || { echo "  cc.txt not created"; ok=0; }
+grep -q 'gcc' cc.txt || { echo "  cc.txt should contain 'gcc'"; ok=0; }
+check "define-injects-env-import" "$ok"
+rm -f build_define_d1.dhall cc.txt
+
+# ---- Case D2: define-required ----
+cat > build_define_d2.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets = [ { mapKey = "define_d2", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Shell = "printf '%s' ${env:CC} > cc2.txt" > ] } } ], default = "define_d2" }
+BUILDEOF
+
+"$BIN" -f build_define_d2.dhall > /tmp/dhake-out-d2.txt 2> /tmp/dhake-err-d2.txt
+rc=$?
+ok=1
+[ "$rc" -ne 0 ] || { echo "  expected nonzero exit, got $rc"; ok=0; }
+grep -q "environment variable" /tmp/dhake-err-d2.txt || { echo "  expected env import error in stderr"; ok=0; }
+[ ! -f cc2.txt ] || { echo "  cc2.txt should not be created"; ok=0; }
+check "define-required" "$ok"
+rm -f build_define_d2.dhall cc2.txt
+
+# ---- Case D3: define-not-leaked-to-recipe ----
+# The buildfile uses env:DEBUG in a Dhall let-binding, but the recipe
+# checks the SHELL environment variable DEBUG (not the Dhall variable).
+# Since restore_defines() is called before recipes run, DEBUG should NOT
+# be set in the shell environment.
+cat > build_define_d3.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets = [ { mapKey = "define_d3", mapValue = { deps = [] : List Text, phony = True, recipe = [ < Shell = "test -z \"$DEBUG\" && printf 'ok' > leaked.txt" > ] } } ], default = "define_d3" }
+BUILDEOF
+
+"$BIN" -f build_define_d3.dhall --define DEBUG=1 > /tmp/dhake-out-d3.txt 2> /tmp/dhake-err-d3.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f leaked.txt ] || { echo "  leaked.txt not created"; ok=0; }
+grep -q 'ok' leaked.txt || { echo "  leaked.txt should contain 'ok'"; ok=0; }
+check "define-not-leaked-to-recipe" "$ok"
+rm -f build_define_d3.dhall leaked.txt
+
 echo
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

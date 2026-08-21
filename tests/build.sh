@@ -502,13 +502,13 @@ if grep -q '^x$' /tmp/dhake-out25.txt; then echo "  'x' leaked to stdout instead
 check "shell-redirect-scoped-stdout" "$ok"
 
 # ---- Case 26: Output hash correct ----
-# A non-phony target produces a file with a declared sha256.
+# A non-phony target produces a file with a declared hash.
 # First run: build succeeds + verified message. Second run: up-to-date.
 HASH26=$(printf 'hello' | sha256sum | cut -d' ' -f1)
 cat > build_output_hash_correct.dhall <<BUILDEOF
 let Action = < Shell : Text >
-let Target = { deps : List Text, phony : Bool, recipe : List Action, sha256 : Text, depsSha256 : List { path : Text, sha256 : Text } }
-in  { targets = [ { mapKey = "out26.txt", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'hello' > out26.txt" > ], sha256 = "${HASH26}" } } ], default = "out26.txt" }
+let Target = { deps : List Text, phony : Bool, recipe : List Action, hash : Text, depsHash : List { path : Text, hash : Text } }
+in  { targets = [ { mapKey = "out26.txt", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'hello' > out26.txt" > ], hash = "sha256:${HASH26}" } } ], default = "out26.txt" }
 BUILDEOF
 
 rm -f out26.txt
@@ -529,11 +529,11 @@ grep -q "is up to date" /tmp/dhake-out26b.txt || { echo "  'is up to date' not f
 check "output-hash-correct-up-to-date" "$ok"
 
 # ---- Case 27: Output hash wrong ----
-# Same as case 26 but with a wrong sha256. Build must fail.
+# Same as case 26 but with a wrong hash. Build must fail.
 cat > build_output_hash_wrong.dhall <<BUILDEOF
 let Action = < Shell : Text >
-let Target = { deps : List Text, phony : Bool, recipe : List Action, sha256 : Text, depsSha256 : List { path : Text, sha256 : Text } }
-in  { targets = [ { mapKey = "out27.txt", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'hello' > out27.txt" > ], sha256 = "0000000000000000000000000000000000000000000000000000000000000000" } } ], default = "out27.txt" }
+let Target = { deps : List Text, phony : Bool, recipe : List Action, hash : Text, depsHash : List { path : Text, hash : Text } }
+in  { targets = [ { mapKey = "out27.txt", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'hello' > out27.txt" > ], hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000" } } ], default = "out27.txt" }
 BUILDEOF
 
 rm -f out27.txt
@@ -545,13 +545,13 @@ grep -qi "hash mismatch" /tmp/dhake-err27.txt || { echo "  hash mismatch error n
 check "output-hash-wrong" "$ok"
 
 # ---- Case 28: Dep hash correct then tampered ----
-# A target with depsSha256 verifying its source dep. First run succeeds.
+# A target with depsHash verifying its source dep. First run succeeds.
 # Then tamper the dep file -> second run fails with dep hash mismatch.
 HASH28=$(printf 'input28' | sha256sum | cut -d' ' -f1)
 cat > build_dep_hash.dhall <<BUILDEOF
 let Action = < Shell : Text | Copy : { from : Text, to : Text } >
-let Target = { deps : List Text, phony : Bool, recipe : List Action, sha256 : Text, depsSha256 : List { path : Text, sha256 : Text } }
-in  { targets = [ { mapKey = "depout28.txt", mapValue = { deps = ["input28.txt"], phony = False, recipe = [ < Copy = { from = "input28.txt", to = "depout28.txt" } > ], depsSha256 = [ { path = "input28.txt", sha256 = "${HASH28}" } ] } } ], default = "depout28.txt" }
+let Target = { deps : List Text, phony : Bool, recipe : List Action, hash : Text, depsHash : List { path : Text, hash : Text } }
+in  { targets = [ { mapKey = "depout28.txt", mapValue = { deps = ["input28.txt"], phony = False, recipe = [ < Copy = { from = "input28.txt", to = "depout28.txt" } > ], depsHash = [ { path = "input28.txt", hash = "sha256:${HASH28}" } ] } } ], default = "depout28.txt" }
 BUILDEOF
 
 rm -f input28.txt depout28.txt
@@ -578,8 +578,8 @@ check "dep-hash-tampered" "$ok"
 HASH29=$(printf 'hello29' | sha256sum | cut -d' ' -f1)
 cat > build_output_tampered.dhall <<BUILDEOF
 let Action = < Shell : Text >
-let Target = { deps : List Text, phony : Bool, recipe : List Action, sha256 : Text, depsSha256 : List { path : Text, sha256 : Text } }
-in  { targets = [ { mapKey = "out29.txt", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'hello29' > out29.txt" > ], sha256 = "${HASH29}" } } ], default = "out29.txt" }
+let Target = { deps : List Text, phony : Bool, recipe : List Action, hash : Text, depsHash : List { path : Text, hash : Text } }
+in  { targets = [ { mapKey = "out29.txt", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'hello29' > out29.txt" > ], hash = "sha256:${HASH29}" } } ], default = "out29.txt" }
 BUILDEOF
 
 rm -f out29.txt
@@ -600,6 +600,36 @@ ok=1
 [ "$rc" -ne 0 ] || { echo "  expected non-zero exit, got $rc"; ok=0; }
 grep -qi "hash mismatch" /tmp/dhake-err29b.txt || { echo "  hash mismatch error not found on stderr"; cat /tmp/dhake-err29b.txt; ok=0; }
 check "output-tampered-up-to-date" "$ok"
+
+# ---- Case 30: Unsupported hash algorithm ----
+# A target with an unsupported algorithm (md5) should fail with clear error.
+cat > build_unsupported_algo.dhall <<BUILDEOF
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, hash : Text, depsHash : List { path : Text, hash : Text } }
+in  { targets = [ { mapKey = "out30.txt", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'hello' > out30.txt" > ], hash = "md5:d41d8cd98f00b204e9800998ecf8427e" } } ], default = "out30.txt" }
+BUILDEOF
+
+"$BIN" -f build_unsupported_algo.dhall > /tmp/dhake-out30.txt 2> /tmp/dhake-err30.txt
+rc=$?
+ok=1
+[ "$rc" -ne 0 ] || { echo "  expected non-zero exit, got $rc"; ok=0; }
+grep -qi "unsupported hash algorithm" /tmp/dhake-err30.txt || { echo "  unsupported algorithm error not found on stderr"; cat /tmp/dhake-err30.txt; ok=0; }
+check "unsupported-algorithm" "$ok"
+
+# ---- Case 31: Bare hex hash (no prefix) rejected ----
+# A target with a bare 64-hex hash (no algorithm prefix) should fail.
+cat > build_bare_hex.dhall <<BUILDEOF
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, hash : Text, depsHash : List { path : Text, hash : Text } }
+in  { targets = [ { mapKey = "out31.txt", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'hello' > out31.txt" > ], hash = "d41d8cd98f00b204e9800998ecf8427e00000000000000000000000000000000" } } ], default = "out31.txt" }
+BUILDEOF
+
+"$BIN" -f build_bare_hex.dhall > /tmp/dhake-out31.txt 2> /tmp/dhake-err31.txt
+rc=$?
+ok=1
+[ "$rc" -ne 0 ] || { echo "  expected non-zero exit, got $rc"; ok=0; }
+grep -qi "must be '<algorithm>:<hexdigest>'" /tmp/dhake-err31.txt || { echo "  bare hex error not found on stderr"; cat /tmp/dhake-err31.txt; ok=0; }
+check "bare-hex-rejected" "$ok"
 
 echo
 echo "=== $pass passed, $fail failed ==="

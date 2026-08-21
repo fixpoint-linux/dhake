@@ -77,8 +77,8 @@ let Action = < Shell : Text
              >
 let Target = { deps : List Text, phony : Bool, recipe : List Action
              , unveil : Optional (List Text)   -- per-target sandbox whitelist
-             , sha256 : Optional Text        -- expected SHA-256 of output (verified builds)
-             , depsSha256 : Optional (List { path : Text, sha256 : Text })
+             , hash : Optional Text        -- expected hash of output (verified builds)
+             , depsHash : Optional (List { path : Text, hash : Text })
              }
 in  { targets = List { mapKey : Text, mapValue : Target }
     , default : Text
@@ -88,7 +88,7 @@ in  { targets = List { mapKey : Text, mapValue : Target }
 
 `deps`, `phony` and `recipe` are required. `unveil` on a target and the
  top-level `sandbox` block are optional (see [Sandboxing](#sandboxing-landlock)).
- The `sha256` and `depsSha256` fields are also optional (see [Verified builds](#verified-builds)).
+ The `hash` and `depsHash` fields are also optional (see [Verified builds](#verified-builds)).
 
 Each target has:
 
@@ -176,37 +176,40 @@ and `&&`/`||` behave correctly.
 
 ### Verified builds
 
-dhake supports **opt-in SHA-256 verification** of build outputs and source dependencies,
-providing reproducible-build guarantees for targets that need them.
+dhake supports **opt-in hash verification** of build outputs and source dependencies,
+providing reproducible-build guarantees for targets that need them. The hash format
+is algorithm-prefixed (e.g., `sha256:<64-hex-digits>`), making it future-proof for
+adding new algorithms like `sha512` later.
 
-- **`sha256 : Text`** (optional, on `Target`) — the expected SHA-256 hex digest of the
-  target's output file. When present, dhake verifies the output after a successful build
-  and also checks it on subsequent runs when the target is "up to date" by mtime (catches
-  tampered outputs). Only meaningful for non-`phony` targets (a `phony` target has no
-  output file to verify).
-- **`depsSha256 : List { path : Text, sha256 : Text }`** (optional, on `Target`) — a
-  list of expected SHA-256 digests for source-file dependencies. dhake verifies these
+- **`hash : Text`** (optional, on `Target`) — the expected hash of the target's output
+  file in the format `<algorithm>:<hexdigest>` (e.g., `sha256:abc123...`). When present,
+  dhake verifies the output after a successful build and also checks it on subsequent
+  runs when the target is "up to date" by mtime (catches tampered outputs). Only
+  meaningful for non-`phony` targets (a `phony` target has no output file to verify).
+- **`depsHash : List { path : Text, hash : Text }`** (optional, on `Target`) — a
+  list of expected hash specs for source-file dependencies. dhake verifies these
   **before** launching the target's recipe, ensuring input integrity regardless of
   whether the target is up to date.
 
-Both fields use the **bare-optional** convention: absent fields mean no verification;
-present fields must have the exact types shown above.
+Both fields use the **algorithm-prefixed** format. The algorithm prefix (currently
+only `sha256` is supported) makes the DSL future-proof: additional algorithms can be
+added by extending the dispatch without breaking existing buildfiles.
 
 **Example:**
 
 ```dhall
 let Action = < Shell : Text >
 let Target = { deps : List Text, phony : Bool, recipe : List Action
-             , sha256 : Text
-             , depsSha256 : List { path : Text, sha256 : Text }
+             , hash : Text
+             , depsHash : List { path : Text, hash : Text }
              }
 in  { targets =
       [ { mapKey = "app"
         , mapValue =
             { deps = ["main.c"], phony = False
             , recipe = [ < Shell = "cc -o app main.c" > ]
-            , sha256 = "abc123..."      -- expected SHA-256 of 'app'
-            , depsSha256 = [ { path = "main.c", sha256 = "def456..." } ]
+            , hash = "sha256:abc123..."      -- expected hash of 'app'
+            , depsHash = [ { path = "main.c", hash = "sha256:def456..." } ]
             }
         }
       ]

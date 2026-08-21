@@ -47,10 +47,18 @@ typedef struct Action {
     struct Action *next;
 } Action;
 
-typedef struct DepSha {
+typedef enum { HASH_SHA256 } HashAlg;
+
+typedef struct Hash {
+    HashAlg alg;
+    char *hex;             /* bare digest for comparison */
+    char *spec;            /* original "algo:hex" string for messages */
+} Hash;
+
+typedef struct DepHash {
     char *path;
-    char *sha256;
-} DepSha;
+    Hash hash;
+} DepHash;
 
 typedef struct Target {
     char *name;
@@ -62,9 +70,9 @@ typedef struct Target {
     char **unveil;
     int nunveil;
     /* verified builds */
-    char *sha256;          /* expected output hash (NULL = no check) */
-    DepSha *dep_sha;      /* expected dep hashes */
-    int ndep_sha;         /* number of dep hashes */
+    Hash *out_hash;        /* expected output hash (NULL = no check) */
+    DepHash *dep_hash;    /* expected dep hashes */
+    int ndep_hash;        /* number of dep hashes */
     /* resolved graph state */
     struct Target **dep_targets;   /* resolved Target* per dep */
     int state;             /* 0 unvisited, 1 visiting (cycle), 2 done */
@@ -118,6 +126,78 @@ static char *read_file(const char *path, size_t *len_out) {
     fclose(f);
     if (len_out) *len_out = len;
     return buf;
+}
+
+/* Parse a hash spec string (e.g. "sha256:abc123...") into a Hash struct.
+ * Dies on parse error, unsupported algorithm, or invalid hex length/chars.
+ * The hex digest is normalized to lowercase for comparison. */
+static Hash parse_hash(const char *spec, const char *where) {
+    if (!spec) die("%s: hash spec is NULL", where);
+    const char *colon = strchr(spec, ':');
+    if (!colon) die("%s: hash spec '%s' must be '<algorithm>:<hexdigest>'", where, spec);
+    size_t algo_len = (size_t)(colon - spec);
+    const char *algo = spec;
+    const char *hex_part = colon + 1;
+    
+    if (algo_len == 0) die("%s: hash spec '%s' has empty algorithm", where, spec);
+    
+    /* Check algorithm */
+    char algo_buf[16];
+    if (algo_len >= sizeof(algo_buf)) die("%s: algorithm name too long in '%s'", where, spec);
+    memcpy(algo_buf, algo, algo_len);
+    algo_buf[algo_len] = '\0';
+    
+    HashAlg alg;
+    if (!strcmp(algo_buf, "sha256")) {
+        alg = HASH_SHA256;
+    } else {
+        die("%s: unsupported hash algorithm '%s' (supported: sha256)", where, algo_buf);
+    }
+    
+    /* Validate hex length: sha256 expects exactly 64 hex chars */
+    size_t hex_len = strlen(hex_part);
+    if (hex_len != 64) die("%s: hash spec '%s' has %zu hex chars, expected 64 for sha256", where, spec, hex_len);
+    
+    /* Validate all chars are hex digits */
+    for (size_t i = 0; i < hex_len; i++) {
+        char c = hex_part[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            die("%s: hash spec '%s' contains non-hex character at position %zu", where, spec, i);
+    }
+    
+    /* Normalize hex to lowercase */
+    char *hex_normalized = malloc(65);
+    if (!hex_normalized) die("out of memory");
+    for (size_t i = 0; i < 64; i++) {
+        char c = hex_part[i];
+        if (c >= 'A' && c <= 'F') hex_normalized[i] = c - 'A' + 'a';
+        else hex_normalized[i] = c;
+    }
+    hex_normalized[64] = '\0';
+    
+    Hash h = {
+        .alg = alg,
+        .hex = hex_normalized,
+        .spec = strdup(spec)
+    };
+    if (!h.spec) die("out of memory");
+    return h;
+}
+
+/* Compute SHA-256 hex digest of a file. out must be a 65-byte buffer (64 hex chars + NUL).
+ * Returns true on success, false on file error. */
+static bool file_sha256_hex(const char *path, char out[65]);
+
+/* Compute hash of a file. out must be a 65-byte buffer (64 hex chars + NUL).
+ * Returns true on success, false on file error. */
+static bool file_hash(const Hash *h, const char *path, char out[65]) {
+    switch (h->alg) {
+    case HASH_SHA256:
+        return file_sha256_hex(path, out);
+    default:
+        die("file_hash: unsupported algorithm %d", h->alg);
+        return false;
+    }
 }
 
 /* Compute SHA-256 hex digest of a file. out must be a 65-byte buffer (64 hex chars + NUL).
@@ -216,27 +296,27 @@ static char **parse_unveil_list(Term *rec, const char *where, int *n_out) {
     return out;
 }
 
-/* Parse an optional `depsSha256 : List { path : Text, sha256 : Text }` field.
+/* Parse an optional `depsHash : List { path : Text, hash : Text }` field.
  * Returns NULL (n_out=0) when the field is absent. Dies on shape errors. */
-static DepSha *parse_dep_sha_list(Term *rec, const char *where, int *n_out) {
+static DepHash *parse_dep_hash_list(Term *rec, const char *where, int *n_out) {
     *n_out = 0;
-    Term *list = rec_get(rec, "depsSha256");
+    Term *list = rec_get(rec, "depsHash");
     if (!list) return NULL;
     if (list->tag != TmNil && list->tag != TmCons)
-        die("%s: 'depsSha256' must be a List { path : Text, sha256 : Text }", where);
+        die("%s: 'depsHash' must be a List { path : Text, hash : Text }", where);
     int n = list_length(list);
     if (n == 0) return NULL;
-    DepSha *out = calloc((size_t)n, sizeof(DepSha));
+    DepHash *out = calloc((size_t)n, sizeof(DepHash));
     if (!out) die("out of memory");
     int i = 0;
     for (Term *p = list; p && p->tag == TmCons; p = p->as.cons.tail) {
         Term *item = p->as.cons.head;
         if (!item || item->tag != TmRecordLit)
-            die("%s: depsSha256 element must be a { path, sha256 } record", where);
+            die("%s: depsHash element must be a { path, hash } record", where);
         char *path = rec_need_text(item, "path", where);
-        char *sha256 = rec_need_text(item, "sha256", where);
+        char *hash_spec = rec_need_text(item, "hash", where);
         out[i].path = path;
-        out[i].sha256 = sha256;
+        out[i].hash = parse_hash(hash_spec, where);
         i++;
     }
     *n_out = n;
@@ -245,14 +325,14 @@ static DepSha *parse_dep_sha_list(Term *rec, const char *where, int *n_out) {
 
 /* Verify all dep hashes for a target. Dies on mismatch or missing file. */
 static int verify_dep_hashes(Target *t) {
-    for (int i = 0; i < t->ndep_sha; i++) {
+    for (int i = 0; i < t->ndep_hash; i++) {
         char got[65];
-        if (!file_sha256_hex(t->dep_sha[i].path, got))
+        if (!file_hash(&t->dep_hash[i].hash, t->dep_hash[i].path, got))
             die("target '%s': dep hash verification failed: file '%s' not found",
-                t->name, t->dep_sha[i].path);
-        if (strcmp(got, t->dep_sha[i].sha256))
+                t->name, t->dep_hash[i].path);
+        if (strcmp(got, t->dep_hash[i].hash.hex))
             die("target '%s': dep hash mismatch for '%s': expected %s, got %s",
-                t->name, t->dep_sha[i].path, t->dep_sha[i].sha256, got);
+                t->name, t->dep_hash[i].path, t->dep_hash[i].hash.spec, got);
     }
     return 0;
 }
@@ -260,12 +340,12 @@ static int verify_dep_hashes(Target *t) {
 /* Verify output hash for a target. Dies on mismatch or missing file. */
 static int verify_output_hash(Target *t) {
     char got[65];
-    if (!file_sha256_hex(t->name, got))
+    if (!file_hash(t->out_hash, t->name, got))
         die("target '%s': output hash verification failed: file '%s' not found",
             t->name, t->name);
-    if (strcmp(got, t->sha256))
+    if (strcmp(got, t->out_hash->hex))
         die("target '%s': output hash mismatch: expected %s, got %s",
-            t->name, t->sha256, got);
+            t->name, t->out_hash->spec, got);
     return 0;
 }
 
@@ -405,14 +485,17 @@ static Target *map_target(Term *mapValue, const char *name) {
     t->phony = rec_bool(mapValue, "phony", false, name);
     t->unveil = parse_unveil_list(mapValue, name, &t->nunveil);
 
-    /* verified builds: optional sha256 and depsSha256 */
-    Term *sha256_term = rec_get(mapValue, "sha256");
-    if (sha256_term) {
-        if (sha256_term->tag != TmText)
-            die("target '%s': 'sha256' must be Text", name);
-        t->sha256 = term_text_cstr(sha256_term);
+    /* verified builds: optional hash and depsHash */
+    Term *hash_term = rec_get(mapValue, "hash");
+    if (hash_term) {
+        if (hash_term->tag != TmText)
+            die("target '%s': 'hash' must be Text", name);
+        char *hash_spec = term_text_cstr(hash_term);
+        t->out_hash = malloc(sizeof(Hash));
+        if (!t->out_hash) die("out of memory");
+        *t->out_hash = parse_hash(hash_spec, name);
     }
-    t->dep_sha = parse_dep_sha_list(mapValue, name, &t->ndep_sha);
+    t->dep_hash = parse_dep_hash_list(mapValue, name, &t->ndep_hash);
 
     Term *recipe = rec_get(mapValue, "recipe");
     if (recipe && recipe->tag != TmNil) {
@@ -1120,11 +1203,11 @@ int main(int argc, char **argv) {
             t->dirty = dirty;
 
             /* Verify dep hashes at launch time (integrity gate on inputs) */
-            if (t->ndep_sha > 0) verify_dep_hashes(t);
+            if (t->ndep_hash > 0) verify_dep_hashes(t);
 
             if (!dirty) {
                 /* Verify output hash for up-to-date non-phony targets */
-                if (t->sha256 != NULL && !t->phony) verify_output_hash(t);
+                if (t->out_hash != NULL && !t->phony) verify_output_hash(t);
                 printf("dhake: '%s' is up to date\n", t->name);
                 /* mark done: decrement deps_pending for dependents */
                 for (int i2 = 0; i2 < n; i2++) {
@@ -1253,9 +1336,9 @@ int main(int argc, char **argv) {
              * must not schedule them (they cannot build on a broken dep). */
             if (rc == 0) {
                 /* Verify output hash for successful non-phony targets */
-                if (completed->sha256 != NULL && !completed->phony) {
+                if (completed->out_hash != NULL && !completed->phony) {
                     verify_output_hash(completed);
-                    printf("dhake: '%s' verified (sha256 %s)\n", completed->name, completed->sha256);
+                    printf("dhake: '%s' verified (hash %s)\n", completed->name, completed->out_hash->spec);
                 }
                 for (int i2 = 0; i2 < n; i2++) {
                     Target *dep = order[i2];

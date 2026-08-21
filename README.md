@@ -49,7 +49,7 @@ rebuilding from source needs the toolchain).
 ## Usage
 
 ```
-dhake [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--lock[=FILE]] [--verify|--check] [--hash-uptodate] [--watch|-w] [--explain|--why] [target ...]
+dhake [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--lock[=FILE]] [--verify|--check] [--hash-uptodate] [--watch|-w] [--explain|--why] [--quiet|-s] [target ...]
 ```
 
 - `-f FILE` — buildfile to evaluate (default: `./Dhakefile.dhall`, else `./build.dhall`)
@@ -62,6 +62,7 @@ dhake [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--lock[=FILE]] [--v
 - `--hash-uptodate` / `--content-addressed` — decide up-to-dateness by content hash instead of mtime (content-addressed builds); see [Verified builds](#verified-builds)
 - `--watch` / `-w` — rebuild and watch the requested targets' source-file dependencies; on any change, rebuild (dev-loop). Uses Linux inotify; fails with an error message on other platforms.
 - `--explain` / `--why` — pure diagnostic: print why each target in the requested subgraph needs rebuilding (or that it is up to date) without running any recipes. Exit code is nonzero if any target is dirty. Useful to see *why* something is out of date before building.
+- `--quiet` / `-s` — suppress per-recipe command echo (summary lines like "building..." and errors are still shown)
 - `target` — build named target(s); default is the buildfile's `default`
 
 Exit codes: `0` success; the failing recipe's exit code on a recipe failure

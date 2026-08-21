@@ -360,6 +360,9 @@ static bool watch_mode = false;
 /* When --explain / --why is given, explain why targets need rebuilding. */
 static bool want_explain = false;
 
+/* When --quiet / -s is given, suppress per-command echo output. */
+static bool quiet = false;
+
 /* Human-readable name of a hash algorithm, for building "<algo>:<hex>" specs. */
 static const char *hash_algo_name(HashAlg alg) {
     switch (alg) {
@@ -1158,21 +1161,21 @@ static int run_shell(const char *cmd) {
     return 2;                            /* signaled */
 }
 
+/* echo an action's command text to stdout; suppressed under --quiet/-s */
+static void action_echo(Action *a);
+
 /* execute one action; returns exit code (0 = ok) */
 static int run_action(Action *a) {
     switch (a->kind) {
     case ACT_SHELL: {
-        printf("%s\n", a->a);           /* echo, like make */
-        fflush(stdout);
+        action_echo(a);
         return run_shell(a->a);
     }
     case ACT_COPY:
-        printf("cp %s %s\n", a->a, a->b);
-        fflush(stdout);
+        action_echo(a);
         return copy_file(a->a, a->b) ? 0 : 1;
     case ACT_MKDIR: {
-        printf(a->recursive ? "mkdir -p %s\n" : "mkdir %s\n", a->a);
-        fflush(stdout);
+        action_echo(a);
         if ((a->recursive ? mkdir_p(a->a) : mkdir(a->a, 0755)) != 0 && errno != EEXIST) {
             fprintf(stderr, "dhake: mkdir: %s\n", strerror(errno));
             return 1;
@@ -1180,20 +1183,17 @@ static int run_action(Action *a) {
         return 0;
     }
     case ACT_RM:
-        printf(a->recursive ? "rm -rf %s\n" : "rm %s\n", a->a);
-        fflush(stdout);
+        action_echo(a);
         if ((a->recursive ? rm_rf(a->a) : remove(a->a)) != 0 && errno != ENOENT) {
             fprintf(stderr, "dhake: rm: %s\n", strerror(errno));
             return 1;
         }
         return 0;
     case ACT_TOUCH:
-        printf("touch %s\n", a->a);
-        fflush(stdout);
+        action_echo(a);
         return touch_file(a->a) ? 0 : 1;
     case ACT_MOVE: {
-        printf("mv %s %s\n", a->a, a->b);
-        fflush(stdout);
+        action_echo(a);
         if (rename(a->a, a->b) != 0) {
             fprintf(stderr, "dhake: move: %s\n", strerror(errno));
             return 1;
@@ -1201,8 +1201,7 @@ static int run_action(Action *a) {
         return 0;
     }
     case ACT_SYMLINK: {
-        printf("ln -s %s %s\n", a->a, a->b);
-        fflush(stdout);
+        action_echo(a);
         if (symlink(a->a, a->b) != 0) {
             fprintf(stderr, "dhake: symlink: %s\n", strerror(errno));
             return 1;
@@ -1210,8 +1209,7 @@ static int run_action(Action *a) {
         return 0;
     }
     case ACT_CHMOD: {
-        printf("chmod %s %s\n", a->b, a->a);
-        fflush(stdout);
+        action_echo(a);
         char *end = NULL;
         errno = 0;
         long mode = strtol(a->b, &end, 8);
@@ -1226,21 +1224,16 @@ static int run_action(Action *a) {
         return 0;
     }
     case ACT_ECHO: {
-        printf("%s\n", a->a);
-        fflush(stdout);
+        action_echo(a);
         return 0;
     }
     case ACT_ENV: {
-        printf("export %s=%s\n", a->a, a->b);
-        fflush(stdout);
+        action_echo(a);
         setenv(a->a, a->b, 1);
         return 0;
     }
     case ACT_RUN: {
-        printf("%s", a->av[0]);
-        for (int i = 1; i < a->nav; i++) printf(" %s", a->av[i]);
-        printf("\n");
-        fflush(stdout);
+        action_echo(a);
         pid_t pid = fork();
         if (pid == -1) {
             fprintf(stderr, "dhake: fork failed for Run: %s\n", strerror(errno));
@@ -1260,6 +1253,30 @@ static int run_action(Action *a) {
     }
     }
     return 2;
+}
+
+/* echo an action's command text to stdout (used by run_action for non-quiet mode) */
+static void action_echo(Action *a) {
+    if (quiet) return;
+    switch (a->kind) {
+    case ACT_SHELL: printf("%s\n", a->a); break;
+    case ACT_COPY:  printf("cp %s %s\n", a->a, a->b); break;
+    case ACT_MKDIR: printf(a->recursive ? "mkdir -p %s\n" : "mkdir %s\n", a->a); break;
+    case ACT_RM:    printf(a->recursive ? "rm -rf %s\n" : "rm %s\n", a->a); break;
+    case ACT_TOUCH: printf("touch %s\n", a->a); break;
+    case ACT_MOVE:  printf("mv %s %s\n", a->a, a->b); break;
+    case ACT_SYMLINK: printf("ln -s %s %s\n", a->a, a->b); break;
+    case ACT_CHMOD: printf("chmod %s %s\n", a->b, a->a); break;
+    case ACT_ECHO:  printf("%s\n", a->a); break;
+    case ACT_ENV:   printf("export %s=%s\n", a->a, a->b); break;
+    case ACT_RUN: {
+        printf("%s", a->av[0]);
+        for (int i = 1; i < a->nav; i++) printf(" %s", a->av[i]);
+        printf("\n");
+        break;
+    }
+    }
+    fflush(stdout);
 }
 
 /* dry-run: print actions without executing */
@@ -1928,7 +1945,7 @@ static int run_explain(Target **order, int n) {
 static void usage(const char *argv0) {
     printf("dhake — a Make-like build tool driven by a Dhall buildfile\n\n");
     printf("Usage:\n");
-    printf("  %s [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--verify|--check] [--lock[=FILE]] [--hash-uptodate|--content-addressed] [--watch|-w] [--explain|--why] [target ...]\n", argv0);
+    printf("  %s [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--verify|--check] [--lock[=FILE]] [--hash-uptodate|--content-addressed] [--watch|-w] [--explain|--why] [--quiet|-s] [target ...]\n", argv0);
     printf("  %s -h | --help\n\n", argv0);
     printf("Options:\n");
     printf("  -f FILE    buildfile to evaluate (default: ./Dhakefile.dhall, else ./build.dhall)\n");
@@ -1956,6 +1973,9 @@ static void usage(const char *argv0) {
     printf("  --explain / --why\n");
     printf("             explain why each target in the requested subgraph needs rebuilding\n");
     printf("             (or is up to date); pure diagnostic, does not run recipes\n");
+    printf("  --quiet / -s\n");
+    printf("             suppress per-recipe command echo (summary lines and errors\n");
+    printf("             are still shown)\n");
     printf("  target     build the named target(s); default: the buildfile's 'default'\n");
 }
 
@@ -1984,6 +2004,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--hash-uptodate") || !strcmp(a, "--content-addressed")) { hash_uptodate = true; }
         else if (!strcmp(a, "--watch") || !strcmp(a, "-w")) { watch_mode = true; }
         else if (!strcmp(a, "--explain") || !strcmp(a, "--why")) { want_explain = true; }
+        else if (!strcmp(a, "--quiet") || !strcmp(a, "-s")) { quiet = true; }
         else if (a[0] == '-') { die("unknown option '%s'", a); }
         else { if (nwanted == wanted_cap) { wanted_cap = wanted_cap ? wanted_cap * 2 : 4; wanted = realloc(wanted, (size_t)wanted_cap * sizeof(char *)); } wanted[nwanted++] = a; }
     }

@@ -1319,6 +1319,67 @@ grep -q "phony target" /tmp/dhake-out-e4.txt || { echo "  'phony target' not fou
 check "explain-phony-target" "$ok"
 rm -f build_explain_e4.dhall
 
+# ---- Case Q1: quiet-build ----
+# Test that -s suppresses command echo but not summary lines
+cat > build_quiet_q1.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets = [ { mapKey = "quiet_b1", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'q1' > quiet_b1.txt" > ] } } ], default = "quiet_b1" }
+BUILDEOF
+
+"$BIN" -f build_quiet_q1.dhall -s > /tmp/dhake-out-q1.txt 2> /tmp/dhake-err-q1.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f quiet_b1.txt ] || { echo "  quiet_b1.txt not created"; ok=0; }
+grep -q 'q1' quiet_b1.txt || { echo "  quiet_b1.txt content incorrect"; ok=0; }
+# Check that the command echo is suppressed
+grep -q "printf 'q1'" /tmp/dhake-out-q1.txt && { echo "  command echo should be suppressed with -s"; ok=0; }
+# Check that building summary is still shown
+grep -q "building" /tmp/dhake-out-q1.txt || { echo "  'building' summary not found"; ok=0; }
+check "quiet-build" "$ok"
+rm -f build_quiet_q1.dhall quiet_b1.txt
+
+# ---- Case Q2: quiet-error-stderr ----
+# Test that -s suppresses command echo even for failing recipes
+cat > build_quiet_q2.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets = [ { mapKey = "quiet_fail", mapValue = { deps = [], phony = False, recipe = [ < Shell = "exit 1" > ] } } ], default = "quiet_fail" }
+BUILDEOF
+
+"$BIN" -f build_quiet_q2.dhall -s > /tmp/dhake-out-q2.txt 2> /tmp/dhake-err-q2.txt
+rc=$?
+ok=1
+[ "$rc" -ne 0 ] || { echo "  expected nonzero exit, got $rc"; ok=0; }
+# Check that the command echo is suppressed on stdout
+grep -q "exit 1" /tmp/dhake-out-q2.txt && { echo "  command echo should be suppressed with -s on stdout"; ok=0; }
+# Check that the command echo is suppressed on stderr too
+grep -q "exit 1" /tmp/dhake-err-q2.txt && { echo "  command echo should be suppressed with -s on stderr"; ok=0; }
+check "quiet-error-stderr" "$ok"
+rm -f build_quiet_q2.dhall
+
+# ---- Case Q3: quiet-alias ----
+# Test that --quiet behaves the same as -s
+cat > build_quiet_q3.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets = [ { mapKey = "quiet_alias", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'alias' > quiet_a.txt" > ] } } ], default = "quiet_alias" }
+BUILDEOF
+
+"$BIN" -f build_quiet_q3.dhall --quiet > /tmp/dhake-out-q3.txt 2> /tmp/dhake-err-q3.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f quiet_a.txt ] || { echo "  quiet_a.txt not created"; ok=0; }
+grep -q 'alias' quiet_a.txt || { echo "  quiet_a.txt content incorrect"; ok=0; }
+# Check that the command echo is suppressed
+grep -q "printf 'alias'" /tmp/dhake-out-q3.txt && { echo "  command echo should be suppressed with --quiet"; ok=0; }
+# Check that building summary is still shown
+grep -q "building" /tmp/dhake-out-q3.txt || { echo "  'building' summary not found"; ok=0; }
+check "quiet-alias" "$ok"
+rm -f build_quiet_q3.dhall quiet_a.txt
+
 echo
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

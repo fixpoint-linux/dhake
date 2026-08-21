@@ -187,21 +187,19 @@ static Hash parse_hash(const char *spec, const char *where) {
     }
     
     /* Normalize hex to lowercase */
-    char *hex_normalized = malloc(65);
-    if (!hex_normalized) die("out of memory");
+    char *hex_normalized = arena_alloc(dhall_arena, 65);
     for (size_t i = 0; i < 64; i++) {
         char c = hex_part[i];
         if (c >= 'A' && c <= 'F') hex_normalized[i] = c - 'A' + 'a';
         else hex_normalized[i] = c;
     }
     hex_normalized[64] = '\0';
-    
+
     Hash h = {
         .alg = alg,
         .hex = hex_normalized,
-        .spec = strdup(spec)
+        .spec = arena_strdup(dhall_arena, spec)
     };
-    if (!h.spec) die("out of memory");
     return h;
 }
 
@@ -246,8 +244,9 @@ static void print_dhall_error(const DhallError *e) {
 /* Normalized Term -> C string / scalar helpers                       */
 /* ------------------------------------------------------------------ */
 
-/* Extract a fully-collapsed Text literal as a malloc'd C string.
- * Returns NULL if t is not Text or still has unresolved interpolation. */
+/* Extract a fully-collapsed Text literal as an arena-owned C string (lives as
+ * long as dhall_arena, i.e. the current build evaluation). Returns NULL if t is
+ * not Text or still has unresolved interpolation. */
 static char *term_text_cstr(Term *t) {
     if (!t || t->tag != TmText) return NULL;
     size_t len = 0;
@@ -255,8 +254,8 @@ static char *term_text_cstr(Term *t) {
         if (p->expr) return NULL;          /* stuck interpolation */
         if (p->lit) len += strlen(p->lit);
     }
-    char *out = malloc(len + 1);
-    if (!out) return NULL;
+    if (!dhall_arena) dhall_arena = arena_new();
+    char *out = arena_alloc(dhall_arena, len + 1);
     char *q = out;
     for (TextPart *p = t->as.text; p; p = p->next)
         if (p->lit) { size_t l = strlen(p->lit); memcpy(q, p->lit, l); q += l; }
@@ -296,7 +295,7 @@ static int list_length(Term *list) {
     return n;
 }
 
-/* Parse an optional `unveil : List Text` field into a strdup'd string array.
+/* Parse an optional `unveil : List Text` field into an arena-owned string array.
  * Returns NULL (n_out=0) when the field is absent. */
 static char **parse_unveil_list(Term *rec, const char *where, int *n_out) {
     *n_out = 0;
@@ -306,8 +305,7 @@ static char **parse_unveil_list(Term *rec, const char *where, int *n_out) {
         die("%s: 'unveil' must be a List Text", where);
     int n = list_length(u);
     if (n == 0) return NULL;
-    char **out = calloc((size_t)n, sizeof(char *));
-    if (!out) die("out of memory");
+    char **out = arena_alloc(dhall_arena, (size_t)n * sizeof(char *));
     int i = 0;
     for (Term *p = u; p && p->tag == TmCons; p = p->as.cons.tail) {
         char *s = term_text_cstr(p->as.cons.head);
@@ -328,8 +326,7 @@ static DepHash *parse_dep_hash_list(Term *rec, const char *where, int *n_out) {
         die("%s: 'depsHash' must be a List { path : Text, hash : Text }", where);
     int n = list_length(list);
     if (n == 0) return NULL;
-    DepHash *out = calloc((size_t)n, sizeof(DepHash));
-    if (!out) die("out of memory");
+    DepHash *out = arena_alloc(dhall_arena, (size_t)n * sizeof(DepHash));
     int i = 0;
     for (Term *p = list; p && p->tag == TmCons; p = p->as.cons.tail) {
         Term *item = p->as.cons.head;
@@ -477,7 +474,7 @@ static Field *union_selected(Term *u) {
  *   - a record { path, <flag> }     -> recursive per <flag>
  *   - a nested single-alt union of the two (the type-honest Dhall spelling
  *     < Plain : Text | <Flag> : { path, <flag> } >)
- * Returns a strdup'd path and sets *recursive. Dies on malformed input. */
+ * Returns an arena-owned path and sets *recursive. Dies on malformed input. */
 static char *action_path(Term *v, const char *flag, bool *recursive, const char *target) {
     *recursive = false;
     if (!v) die("target '%s': Mkdir/Rm payload missing", target);
@@ -501,8 +498,7 @@ static Action *map_action(Term *u, const char *target) {
         die("target '%s': recipe element must be an Action union (< Tag = v >)", target);
     Field *sel = union_selected(u);
     if (!sel) die("target '%s': malformed Action union", target);
-    Action *a = calloc(1, sizeof *a);
-    if (!a) die("out of memory");
+    Action *a = arena_alloc(dhall_arena, sizeof *a);
     const char *tag = sel->label;
     if (!strcmp(tag, "Shell")) {
         a->kind = ACT_SHELL;
@@ -556,8 +552,7 @@ static Action *map_action(Term *u, const char *target) {
         if (!argv_list) die("target '%s': Run must have an 'argv' field", target);
         int n = list_length(argv_list);
         if (n == 0) die("target '%s': Run argv must be non-empty", target);
-        a->av = calloc((size_t)(n + 1), sizeof(char *));
-        if (!a->av) die("out of memory");
+        a->av = arena_alloc(dhall_arena, (size_t)(n + 1) * sizeof(char *));
         a->nav = n;
         int i = 0;
         for (Term *p = argv_list; p && p->tag == TmCons; p = p->as.cons.tail) {
@@ -576,8 +571,7 @@ static Action *map_action(Term *u, const char *target) {
 static Target *map_target(Term *mapValue, const char *name) {
     if (!mapValue || mapValue->tag != TmRecordLit)
         die("target '%s': mapValue must be a record { deps, phony, recipe }", name);
-    Target *t = calloc(1, sizeof *t);
-    if (!t) die("out of memory");
+    Target *t = arena_alloc(dhall_arena, sizeof *t);
     t->name = (char *)name;
 
     Term *deps = rec_get(mapValue, "deps");
@@ -585,7 +579,7 @@ static Target *map_target(Term *mapValue, const char *name) {
         if (deps->tag != TmNil && deps->tag != TmCons)
             die("target '%s': 'deps' must be a List Text", name);
         t->ndeps = list_length(deps);
-        t->deps = calloc((size_t)(t->ndeps ? t->ndeps : 1), sizeof(char *));
+        t->deps = arena_alloc(dhall_arena, (size_t)(t->ndeps ? t->ndeps : 1) * sizeof(char *));
         int i = 0;
         for (Term *p = deps; p && p->tag == TmCons; p = p->as.cons.tail) {
             char *d = term_text_cstr(p->as.cons.head);
@@ -602,8 +596,7 @@ static Target *map_target(Term *mapValue, const char *name) {
         if (hash_term->tag != TmText)
             die("target '%s': 'hash' must be Text", name);
         char *hash_spec = term_text_cstr(hash_term);
-        t->out_hash = malloc(sizeof(Hash));
-        if (!t->out_hash) die("out of memory");
+        t->out_hash = arena_alloc(dhall_arena, sizeof(Hash));
         *t->out_hash = parse_hash(hash_spec, name);
     }
     t->dep_hash = parse_dep_hash_list(mapValue, name, &t->ndep_hash);
@@ -625,8 +618,7 @@ static Target *map_target(Term *mapValue, const char *name) {
 static Build *build_plan(Term *root) {
     if (!root || root->tag != TmRecordLit)
         die("buildfile must evaluate to a record { targets, default }");
-    Build *b = calloc(1, sizeof *b);
-    if (!b) die("out of memory");
+    Build *b = arena_alloc(dhall_arena, sizeof *b);
 
     Term *default_t = rec_get(root, "default");
     if (default_t) b->default_name = term_text_cstr(default_t);
@@ -716,7 +708,7 @@ static Target *find_target(Build *b, const char *name) {
  * build target).  A missing source file is reported lazily during the build. */
 static void resolve_deps(Build *b) {
     for (Target *t = b->targets; t; t = t->next) {
-        t->dep_targets = calloc((size_t)(t->ndeps ? t->ndeps : 1), sizeof(Target *));
+        t->dep_targets = arena_alloc(dhall_arena, (size_t)(t->ndeps ? t->ndeps : 1) * sizeof(Target *));
         for (int i = 0; i < t->ndeps; i++)
             t->dep_targets[i] = find_target(b, t->deps[i]);   /* NULL = source file */
     }

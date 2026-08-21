@@ -1190,11 +1190,14 @@ fi
 # Modify the source file
 printf 'v2\n' > watch_src.txt
 
-# Wait for rebuild (poll up to 10s for >= 2 "building" lines)
+# Wait for the rebuild to complete. Poll for BOTH the second "building" line in
+# the log AND the updated output file, because dhake prints "building ..." before
+# the forked recipe writes watch_out.txt — checking the log alone can read the
+# stale output before the recipe finishes. (10s timeout, 0.1s polls.)
 rebuild_count=0
 for i in $(seq 1 100); do
     count=$(grep -c "building" /tmp/dhake-watch-log.txt || true)
-    if [ "$count" -ge 2 ]; then
+    if [ "$count" -ge 2 ] && grep -q "v2" watch_out.txt 2>/dev/null; then
         rebuild_count=1
         break
     fi
@@ -1202,9 +1205,10 @@ for i in $(seq 1 100); do
 done
 
 if [ "$rebuild_count" -ne 1 ]; then
-    echo "  rebuild not detected (building count < 2)"
+    echo "  rebuild not detected (building count < 2 and/or watch_out.txt != v2)"
     count=$(grep -c "building" /tmp/dhake-watch-log.txt || true)
     echo "  building count: $count"
+    echo "  watch_out.txt: $(cat watch_out.txt 2>/dev/null)"
     cat /tmp/dhake-watch-log.txt
     ok=0
 fi

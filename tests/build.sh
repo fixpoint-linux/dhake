@@ -911,6 +911,72 @@ fi
 rm -f denyNetwork_fc_marker
 check "denyNetwork-fail-closed" "$ok"
 
+# ---- Case A: Lockfile with verified target ----
+# Build a target with --lock and verify the lockfile contains correct data
+HASH_A=$(printf 'lockfile-test' | sha256sum | cut -d' ' -f1)
+cat > build_lock_A.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, hash : Text, depsHash : List { path : Text, hash : Text } }
+in  { targets = [ { mapKey = "lockoutA.txt", mapValue = { deps = [], phony = False, recipe = [ < Shell = "printf 'lockfile-test' > lockoutA.txt" > ], hash = "sha256:PLACEHOLDER" } } ], default = "lockoutA.txt" }
+BUILDEOF
+sed -i "s/PLACEHOLDER/${HASH_A}/" build_lock_A.dhall
+
+rm -f lockoutA.txt dhake.lock
+"$BIN" -f build_lock_A.dhall --lock > /tmp/dhake-outA.txt 2> /tmp/dhake-errA.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f dhake.lock ] || { echo "  dhake.lock not created"; ok=0; }
+# Check it's valid JSON (starts with {)
+head -c1 dhake.lock | grep -q '{' || { echo "  dhake.lock doesn't start with {"; ok=0; }
+# Check it contains the target name
+grep -q 'lockoutA.txt' dhake.lock || { echo "  target name not in lockfile"; ok=0; }
+# Check it contains the expected outputHash
+grep -q "sha256:${HASH_A}" dhake.lock || { echo "  expected outputHash not in lockfile"; ok=0; }
+# Check it contains the format and version
+grep -q '"format": "dhake.lock"' dhake.lock || { echo "  format not in lockfile"; ok=0; }
+grep -q '"version": 1' dhake.lock || { echo "  version not in lockfile"; ok=0; }
+check "lockfile-verified-target" "$ok"
+rm -f lockoutA.txt dhake.lock build_lock_A.dhall
+
+# ---- Case B: Lockfile with 3-level dependency chain ----
+# chain_a depends on chain_b depends on chain_c; verify chain_a's transitiveDeps contains both chain_b and chain_c
+cat > build_lock_B.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets = [ { mapKey = "chain_c", mapValue = { deps = [], phony = False, recipe = [ < Shell = "echo c > chain_c" > ] } }, { mapKey = "chain_b", mapValue = { deps = ["chain_c"], phony = False, recipe = [ < Shell = "echo b > chain_b" > ] } }, { mapKey = "chain_a", mapValue = { deps = ["chain_b"], phony = False, recipe = [ < Shell = "echo a > chain_a" > ] } } ], default = "chain_a" }
+BUILDEOF
+
+rm -f chain_a chain_b chain_c dhake.lock
+"$BIN" -f build_lock_B.dhall --lock > /tmp/dhake-outB.txt 2> /tmp/dhake-errB.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ -f dhake.lock ] || { echo "  dhake.lock not created"; ok=0; }
+# Check chain_a's transitiveDeps contains both chain_b and chain_c
+grep -A20 '"name": "chain_a"' dhake.lock | grep -q '"transitiveDeps"' || { echo "  chain_a's transitiveDeps not found"; ok=0; }
+grep -A20 '"name": "chain_a"' dhake.lock | grep -q '"chain_b"' || { echo "  chain_b not in chain_a's transitiveDeps"; ok=0; }
+grep -A20 '"name": "chain_a"' dhake.lock | grep -q '"chain_c"' || { echo "  chain_c not in chain_a's transitiveDeps"; ok=0; }
+check "lockfile-transitive-deps-chain" "$ok"
+rm -f chain_a chain_b chain_c dhake.lock build_lock_B.dhall
+
+# ---- Case C: --lock with dry-run writes no lockfile ----
+cat > build_lock_C.dhall <<'BUILDEOF'
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets = [ { mapKey = "lockc", mapValue = { deps = [], phony = False, recipe = [ < Shell = "echo c > lockc" > ] } } ], default = "lockc" }
+BUILDEOF
+
+rm -f lockc dhake.lock custom.lock
+"$BIN" -f build_lock_C.dhall --lock=custom.lock -n > /tmp/dhake-outC.txt 2> /tmp/dhake-errC.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  expected exit 0, got $rc"; ok=0; }
+[ ! -f custom.lock ] || { echo "  custom.lock should not exist with dry-run"; ok=0; }
+[ ! -f dhake.lock ] || { echo "  dhake.lock should not exist with dry-run"; ok=0; }
+check "lockfile-dry-run-no-write" "$ok"
+rm -f lockc custom.lock dhake.lock build_lock_C.dhall
+
 rm -f netprobe.c netprobe build_denyNetwork.dhall build_denyNetwork_unix.dhall build_no_denyNetwork.dhall build_denyNetwork_failclosed.dhall
 
 echo

@@ -45,7 +45,7 @@ rebuilding from source needs the toolchain).
 ## Usage
 
 ```
-dhake [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [target ...]
+dhake [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--lock[=FILE]] [target ...]
 ```
 
 - `-f FILE` — buildfile to evaluate (default: `./Dhakefile.dhall`, else `./build.dhall`)
@@ -53,6 +53,7 @@ dhake [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [target ...]
 - `-n` — dry run: print actions without running them
 - `--list` — list targets and exit
 - `--warn-hash-mismatch` — report verified-build hash mismatches as warnings (printing the actual hash) instead of failing; see [Verified builds](#verified-builds)
+- `--lock[=FILE]` — write a lockfile (default: `dhake.lock`, or `FILE` if `=FILE` given) with actual hashes and transitive dependencies after a successful build; see [Lockfile / SBOM](#lockfile--sbom)
 - `target` — build named target(s); default is the buildfile's `default`
 
 Exit codes: `0` success; the failing recipe's exit code on a recipe failure
@@ -251,6 +252,87 @@ dhake: 'app' verified (hash sha256:new...)
 Copy the `sha256:new...` value into the buildfile's `hash` / `depsHash` fields and
 commit. `--warn-hash-mismatch` only relaxes *hash* verification — other errors
 (missing files, recipe failures) still abort the build.
+
+### Lockfile / SBOM
+
+dhake can export a **lockfile** (machine-readable manifest / SBOM) after a successful
+build using `--lock[=FILE]`. The lockfile captures the actual SHA-256 hashes of every
+output and dependency, plus the full transitive dependency closure, enabling:
+
+- **Reproducibility verification** — confirm that a build's outputs match the pinned hashes
+- **CI provenance** — feed the lockfile to CI or provenance tools to verify build artifacts
+- **Dependency auditing** — inspect the complete dependency graph of each target
+
+**Schema:**
+
+```json
+{
+  "format": "dhake.lock",
+  "version": 1,
+  "default": "target-name" | null,
+  "targets": [
+    {
+      "name": "string",
+      "phony": true | false,
+      "deps": ["string", ...],
+      "transitiveDeps": ["string", ...],
+      "outputHash": {"algorithm": "sha256", "value": "sha256:<hex>"} | null,
+      "depHashes": [{"path": "string", "algorithm": "sha256", "value": "sha256:<hex>"}, ...]
+    },
+    ...
+  ]
+}
+```
+
+- `format` — always `"dhake.lock"`
+- `version` — currently `1`
+- `default` — the buildfile's default target name, or `null`
+- `targets` — array of all targets in buildfile order
+- `name` — target name
+- `phony` — whether the target is phony
+- `deps` — declared dependency names (buildfile order)
+- `transitiveDeps` — all target names reachable via dependencies, excluding self (deterministic order)
+- `outputHash` — actual SHA-256 hash of the target's output file, or `null` if phony or file missing
+- `depHashes` — actual SHA-256 hashes of declared `depsHash` paths that exist; missing files are omitted
+
+**Example:**
+
+```bash
+$ dhake --lock
+# builds targets, then writes dhake.lock
+dhake: wrote lockfile dhake.lock
+
+$ dhake --lock=release.lock
+# writes to release.lock instead
+
+$ cat dhake.lock
+{
+  "format": "dhake.lock",
+  "version": 1,
+  "default": "app",
+  "targets": [
+    {
+      "name": "main.c",
+      "phony": false,
+      "deps": [],
+      "transitiveDeps": [],
+      "outputHash": {"algorithm": "sha256", "value": "sha256:abc123..."},
+      "depHashes": []
+    },
+    {
+      "name": "app",
+      "phony": false,
+      "deps": ["main.c"],
+      "transitiveDeps": ["main.c"],
+      "outputHash": {"algorithm": "sha256", "value": "sha256:def456..."},
+      "depHashes": []
+    }
+  ]
+}
+```
+
+The lockfile is **only written on successful builds** (exit code 0), and **never**
+written during `--list`, `-n` (dry-run), or when a build fails.
 
 ### Example
 

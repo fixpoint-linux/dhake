@@ -130,11 +130,11 @@ in  { targets =
               { deps = [ "src/dhake.c" ] # core
               , phony = False
               -- expected hash of the produced dhake.com (verified after build)
-              , hash = "sha256:110576efad85dfad3911623d089ed4f9c640da05640f9b0144039d8a45c94e57"
+              , hash = "sha256:67c5b525dda2ab162db44f912ea544493f3f6ce19cac2bc297db14c580d5fb10"
               -- expected hash of each source dep (verified before build)
               , depsHash =
                   [ { path = "src/dhake.c"
-                    , hash = "sha256:016de3a5bb542d3ebbeae2a866532ef9f632b178e4d9ba2732b89f1b97ad570f"
+                    , hash = "sha256:15f48a89e0d1d9ad1d0e2d6fc532f834443c38511e14c5ca154bcf6ef2f96801"
                     }
                   ] # coreHashes
               , recipe =

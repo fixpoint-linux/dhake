@@ -1226,10 +1226,216 @@ static const char *default_buildfile(void) {
     return "build.dhall";
 }
 
+/* ------------------------------------------------------------------ */
+/* Lockfile / SBOM support                                               */
+/* ------------------------------------------------------------------ */
+
+/* Path for --lock[=FILE] option (NULL = not requested) */
+static const char *lock_path = NULL;
+
+/* JSON string escaping: write escaped version of s to f. */
+static void json_escape_str(FILE *f, const char *s) {
+    if (!s) { fputs("null", f); return; }
+    fputc('"', f);
+    for (const char *p = s; *p; p++) {
+        switch (*p) {
+            case '"':  fprintf(f, "\\\""); break;
+            case '\\': fprintf(f, "\\\\"); break;
+            case '\b': fprintf(f, "\\b");  break;
+            case '\f': fprintf(f, "\\f");  break;
+            case '\n': fprintf(f, "\\n");  break;
+            case '\r': fprintf(f, "\\r");  break;
+            case '\t': fprintf(f, "\\t");  break;
+            default:
+                if (*p >= 0 && *p < 32) {
+                    fprintf(f, "\\u%04x", (unsigned char)*p);
+                } else {
+                    fputc(*p, f);
+                }
+                break;
+        }
+    }
+    fputc('"', f);
+}
+
+/* Collect transitive dependencies via iterative DFS over dep_targets.
+ * Returns a NULL-terminated array of unique target names (malloc'd).
+ * Excludes the starting target itself. Caller must free the array. */
+static char **collect_transitive_deps(Build *b, Target *t, int *n_out) {
+    /* Count total targets for sizing */
+    int total = b->ntargets;
+    
+    /* Use a simple pointer-based visited set (target pointers are unique) */
+    bool *visited = calloc((size_t)total, sizeof(bool));
+    if (!visited) die("out of memory");
+    
+    /* Map target pointer to index */
+    Target **all_targets = malloc((size_t)total * sizeof(Target *));
+    if (!all_targets) { free(visited); die("out of memory"); }
+    int ntargets = 0;
+    for (Target *p = b->targets; p; p = p->next) {
+        all_targets[ntargets++] = p;
+    }
+    
+    /* Stack of (target, next_dep_index) */
+    typedef struct { Target *t; int i; } Frame;
+    Frame *stack = malloc((size_t)total * sizeof(Frame));
+    if (!stack) { free(visited); free(all_targets); die("out of memory"); }
+    int top = 0;
+    
+    /* Result array */
+    char **result = malloc((size_t)total * sizeof(char *));
+    if (!result) { free(visited); free(all_targets); free(stack); die("out of memory"); }
+    int result_count = 0;
+    
+    /* Start DFS from each dep_target of t */
+    for (int j = 0; j < t->ndeps; j++) {
+        Target *d = t->dep_targets[j];
+        if (!d) continue; /* source file, not a target */
+        
+        /* Find index of d */
+        int idx = -1;
+        for (int k = 0; k < ntargets; k++) {
+            if (all_targets[k] == d) { idx = k; break; }
+        }
+        if (idx < 0) continue;
+        
+        if (!visited[idx]) {
+            visited[idx] = true;
+            stack[top++] = (Frame){d, 0};
+        }
+    }
+    
+    while (top > 0) {
+        Frame *f = &stack[top - 1];
+        if (f->i < f->t->ndeps) {
+            Target *d = f->t->dep_targets[f->i++];
+            if (!d) continue;
+            
+            /* Find index of d */
+            int idx = -1;
+            for (int k = 0; k < ntargets; k++) {
+                if (all_targets[k] == d) { idx = k; break; }
+            }
+            if (idx < 0) continue;
+            
+            if (!visited[idx]) {
+                visited[idx] = true;
+                stack[top++] = (Frame){d, 0};
+            }
+        } else {
+            /* Add to result if not the original target */
+            if (f->t != t) {
+                result[result_count++] = (char *)f->t->name;
+            }
+            top--;
+        }
+    }
+    
+    *n_out = result_count;
+    free(visited);
+    free(all_targets);
+    free(stack);
+    
+    return result;
+}
+
+/* Write lockfile JSON to path. Only called on successful build (failed==0). */
+static void write_lockfile(Build *b, const char *path) {
+    FILE *f = fopen(path, "w");
+    if (!f) { fprintf(stderr, "dhake: warning: cannot open lockfile '%s': %s\n", path, strerror(errno)); return; }
+    
+    /* Find default target name */
+    const char *default_name = b->default_name;
+    
+    /* Write header */
+    fprintf(f, "{\n");
+    fprintf(f, "  \"format\": \"dhake.lock\",\n");
+    fprintf(f, "  \"version\": 1,\n");
+    fprintf(f, "  \"default\": ");
+    if (default_name) {
+        json_escape_str(f, default_name);
+    } else {
+        fputs("null", f);
+    }
+    fprintf(f, ",\n");
+    fprintf(f, "  \"targets\": [\n");
+    
+    /* Write each target in buildfile order */
+    bool first_target = true;
+    for (Target *t = b->targets; t; t = t->next) {
+        if (!first_target) fprintf(f, ",\n");
+        first_target = false;
+        
+        fprintf(f, "    {\n");
+        fprintf(f, "      \"name\": ");
+        json_escape_str(f, t->name);
+        fprintf(f, ",\n");
+        
+        fprintf(f, "      \"phony\": %s,\n", t->phony ? "true" : "false");
+        
+        /* deps */
+        fprintf(f, "      \"deps\": [");
+        for (int i = 0; i < t->ndeps; i++) {
+            if (i > 0) fprintf(f, ", ");
+            json_escape_str(f, t->deps[i]);
+        }
+        fprintf(f, "],\n");
+        
+        /* transitiveDeps */
+        int n_trans = 0;
+        char **trans_deps = collect_transitive_deps(b, t, &n_trans);
+        fprintf(f, "      \"transitiveDeps\": [");
+        for (int i = 0; i < n_trans; i++) {
+            if (i > 0) fprintf(f, ", ");
+            json_escape_str(f, trans_deps[i]);
+        }
+        fprintf(f, "],\n");
+        free(trans_deps);
+        
+        /* outputHash */
+        fprintf(f, "      \"outputHash\": ");
+        if (t->phony) {
+            fputs("null", f);
+        } else {
+            char actual_hash[65];
+            if (file_sha256_hex(t->name, actual_hash)) {
+                fprintf(f, "{\"algorithm\": \"sha256\", \"value\": \"sha256:%s\"}", actual_hash);
+            } else {
+                fputs("null", f);
+            }
+        }
+        fprintf(f, ",\n");
+        
+        /* depHashes */
+        fprintf(f, "      \"depHashes\": [");
+        bool first_dep_hash = true;
+        for (int i = 0; i < t->ndep_hash; i++) {
+            char actual_hash[65];
+            if (file_sha256_hex(t->dep_hash[i].path, actual_hash)) {
+                if (!first_dep_hash) fprintf(f, ", ");
+                first_dep_hash = false;
+                fprintf(f, "{\"path\": ");
+                json_escape_str(f, t->dep_hash[i].path);
+                fprintf(f, ", \"algorithm\": \"sha256\", \"value\": \"sha256:%s\"}", actual_hash);
+            }
+        }
+        fprintf(f, "]\n");
+        
+        fprintf(f, "    }");
+    }
+    
+    fprintf(f, "\n  ]\n");
+    fprintf(f, "}\n");
+    
+    fclose(f);
+    printf("dhake: wrote lockfile %s\n", path);
+}
+
 static void usage(const char *argv0) {
     printf("dhake — a Make-like build tool driven by a Dhall buildfile\n\n");
     printf("Usage:\n");
-    printf("  %s [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [target ...]\n", argv0);
+    printf("  %s [-f FILE] [-j N] [-n] [--list] [--warn-hash-mismatch] [--lock[=FILE]] [target ...]\n", argv0);
     printf("  %s -h | --help\n\n", argv0);
     printf("Options:\n");
     printf("  -f FILE    buildfile to evaluate (default: ./Dhakefile.dhall, else ./build.dhall)\n");
@@ -1239,6 +1445,9 @@ static void usage(const char *argv0) {
     printf("  --warn-hash-mismatch\n");
     printf("             report verified-build hash mismatches as warnings (printing the\n");
     printf("             actual hash) instead of failing, so pinned hashes can be updated\n");
+    printf("  --lock[=FILE]\n");
+    printf("             write a lockfile (dhake.lock, or FILE if =FILE given) with\n");
+    printf("             actual hashes and transitive dependencies after a successful build\n");
     printf("  target     build the named target(s); default: the buildfile's 'default'\n");
 }
 
@@ -1261,6 +1470,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-n") || !strcmp(a, "--dry-run")) { dry_run = true; }
         else if (!strcmp(a, "--list")) { want_list = true; }
         else if (!strcmp(a, "--warn-hash-mismatch")) { warn_hash_mismatch = true; }
+        else if (!strcmp(a, "--lock")) { lock_path = "dhake.lock"; }
+        else if (!strncmp(a, "--lock=", 7)) { lock_path = a + 7; }
         else if (a[0] == '-') { die("unknown option '%s'", a); }
         else { if (nwanted == wanted_cap) { wanted_cap = wanted_cap ? wanted_cap * 2 : 4; wanted = realloc(wanted, (size_t)wanted_cap * sizeof(char *)); } wanted[nwanted++] = a; }
     }
@@ -1560,6 +1771,11 @@ int main(int argc, char **argv) {
     free(roots);
     free(order);
     free((void *)wanted);
+
+    /* Write lockfile if requested, only on success, not dry-run, not --list */
+    if (lock_path != NULL && !dry_run && !want_list && failed == 0) {
+        write_lockfile(b, lock_path);
+    }
 
     return failed;
 }

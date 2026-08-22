@@ -140,6 +140,8 @@ headerView =
             , text " is total, terminating, and typechecked — so your build definition always means exactly what it says. Typed actions · incremental · parallel · "
             , b [] [ text "hash-verified" ]
             , text " · "
+            , b [] [ text "sandboxed" ]
+            , text " · "
             , b [] [ text "self-hosting" ]
             , text "."
             ]
@@ -196,7 +198,7 @@ featuresSection =
     Fixpoint.Section.view
         { id = "features"
         , title = "Features"
-        , hint = "// parallel · typed · incremental"
+        , hint = "// parallel · typed · incremental · verified · sandboxed · cached"
         , children =
             [ Fixpoint.Grid.grid
                 [ Fixpoint.Card.view
@@ -324,6 +326,105 @@ featuresSection =
                         , text " after a successful build: every target's output and dep hashes plus its transitive dependency closure. A commit-and-diff supply-chain artifact for CI and provenance tools."
                         ]
                     }
+                , Fixpoint.Card.view
+                    { n = "11"
+                    , title = "Verify / check"
+                    , body =
+                        [ Fixpoint.Code.inline "--verify"
+                        , text " (alias "
+                        , Fixpoint.Code.inline "--check"
+                        , text ") pre-flights a build: it checks every pinned hash and up-to-dateness without running any recipe. A cheap CI gate."
+                        ]
+                    }
+                , Fixpoint.Card.view
+                    { n = "12"
+                    , title = "Content-addressed"
+                    , body =
+                        [ Fixpoint.Code.inline "--hash-uptodate"
+                        , text " decides up-to-dateness by content hash instead of mtime — a touched-but-unchanged file no longer triggers a rebuild."
+                        ]
+                    }
+                , Fixpoint.Card.view
+                    { n = "13"
+                    , title = "Dev-loop watch"
+                    , body =
+                        [ Fixpoint.Code.inline "--watch"
+                        , text " (alias "
+                        , Fixpoint.Code.inline "-w"
+                        , text ") uses inotify on your source-file dependencies and rebuilds on any change — edit-save-refresh becomes a single seamless loop."
+                        ]
+                    }
+                , Fixpoint.Card.view
+                    { n = "14"
+                    , title = "Explain / why"
+                    , body =
+                        [ Fixpoint.Code.inline "--explain"
+                        , text " (alias "
+                        , Fixpoint.Code.inline "--why"
+                        , text ") prints why each dirty target needs rebuilding — newer dep, hash mismatch, or missing output — without running anything."
+                        ]
+                    }
+                , Fixpoint.Card.view
+                    { n = "15"
+                    , title = "Quiet / silent"
+                    , body =
+                        [ Fixpoint.Code.inline "--quiet"
+                        , text " (alias "
+                        , Fixpoint.Code.inline "-s"
+                        , text ") suppresses per-recipe command echo; summaries and errors stay visible."
+                        ]
+                    }
+                , Fixpoint.Card.view
+                    { n = "16"
+                    , title = "Build parameters"
+                    , body =
+                        [ Fixpoint.Code.inline "--define KEY=VALUE"
+                        , text " (alias "
+                        , Fixpoint.Code.inline "-D"
+                        , text ") injects values into the buildfile's "
+                        , Fixpoint.Code.inline "env:"
+                        , text " imports — one Dhakefile does debug/release or -O0/-O3, CMake-style."
+                        ]
+                    }
+                , Fixpoint.Card.view
+                    { n = "17"
+                    , title = "Dependency graph"
+                    , body =
+                        [ Fixpoint.Code.inline "--graph[=dot|mermaid]"
+                        , text " dumps the full resolved graph (target→dep edges, phony styling, expected hashes) — perfect for inspecting the topology and for docs."
+                        ]
+                    }
+                , Fixpoint.Card.view
+                    { n = "18"
+                    , title = "Per-target cwd"
+                    , body =
+                        [ text "An optional "
+                        , Fixpoint.Code.inline "cwd"
+                        , text " field runs a target's recipe in a subdirectory — no shell "
+                        , Fixpoint.Code.inline "cd"
+                        , text " boilerplate, and it composes with the sandbox."
+                        ]
+                    }
+                , Fixpoint.Card.view
+                    { n = "19"
+                    , title = "Multi-arch builds"
+                    , body =
+                        [ Fixpoint.Code.inline "--arch=NAME"
+                        , text " sets "
+                        , Fixpoint.Code.inline "$DHAKE_ARCH"
+                        , text " and lets targets carry an "
+                        , Fixpoint.Code.inline "arch"
+                        , text " filter — one Dhakefile cross-compiles x86_64 and aarch64 from a single run."
+                        ]
+                    }
+                , Fixpoint.Card.view
+                    { n = "20"
+                    , title = "Build cache"
+                    , body =
+                        [ Fixpoint.Code.inline "--cache[=DIR]"
+                        , text " adds a ccache-style cache keyed on the target name, arch, recipe, and content hashes of all inputs. Unchanged inputs restore the output and skip the recipe — pinned output hashes are still verified on restore."
+                        ]
+                    }
                 ]
             ]
         }
@@ -346,9 +447,13 @@ exampleSection =
                 , Fixpoint.Code.inline "hash"
                 , text " and "
                 , Fixpoint.Code.inline "depsHash"
-                , text " fields to pin the expected sha256 of outputs and source deps, and a top-level "
+                , text " fields to pin the expected sha256 of outputs and source deps, "
+                , Fixpoint.Code.inline "cwd"
+                , text " to run the recipe in a subdirectory, and "
+                , Fixpoint.Code.inline "arch"
+                , text " to limit a target to a specific architecture. A top-level "
                 , Fixpoint.Code.inline "sandbox"
-                , text " block to run every recipe in a Landlock write-containment sandbox — see the README."
+                , text " block runs every recipe in a Landlock write-containment sandbox — see the README."
                 ]
             ]
         }
@@ -377,6 +482,10 @@ exampleCodeBlock =
     , text "             , hash : Text"
     , text "\n"
     , text "             , depsHash : List { path : Text, hash : Text }"
+    , text "\n"
+    , text "             , cwd : Text"
+    , text "\n"
+    , text "             , arch : Optional Text"
     , text "             }"
     , text "\n"
     , Fixpoint.Code.k "in"
@@ -418,6 +527,12 @@ exampleCodeBlock =
     , text ", hash = "
     , Fixpoint.Code.g "\"sha256:def456…\""
     , text " } ]"
+    , text "\n"
+    , text "                     , cwd = "
+    , Fixpoint.Code.g "\"src\""
+    , text "\n"
+    , text "                     , arch = "
+    , Fixpoint.Code.g "None Text"
     , text "\n"
     , text "                     }"
     , text "\n"

@@ -49,7 +49,7 @@ rebuilding from source needs the toolchain).
 ## Usage
 
 ```
-dhake [-f FILE] [-j N] [-n] [-D KEY=VALUE|--define KEY=VALUE] [--arch=NAME] [--list] [--warn-hash-mismatch] [--lock[=FILE]] [--verify|--check] [--hash-uptodate] [--watch|-w] [--explain|--why] [--graph[=dot|mermaid]] [--quiet|-s] [target ...]
+dhake [-f FILE] [-j N] [-n] [-D KEY=VALUE|--define KEY=VALUE] [--arch=NAME] [--cache[=DIR]] [--list] [--warn-hash-mismatch] [--lock[=FILE]] [--verify|--check] [--hash-uptodate] [--watch|-w] [--explain|--why] [--graph[=dot|mermaid]] [--quiet|-s] [target ...]
 ```
 
 - `-f FILE` — buildfile to evaluate (default: `./Dhakefile.dhall`, else `./build.dhall`)
@@ -66,6 +66,7 @@ dhake [-f FILE] [-j N] [-n] [-D KEY=VALUE|--define KEY=VALUE] [--arch=NAME] [--l
 - `--quiet` / `-s` — suppress per-recipe command echo (summary lines like "building..." and errors are still shown)
 - `-D KEY=VALUE` / `--define KEY=VALUE` — inject `KEY=VALUE` into the buildfile evaluation environment, making it available to `env:KEY` imports (CMake-style). Use the same Dhakefile for debug/release builds by passing different `--define` values.
 - `--arch=NAME` — set the architecture to `NAME` for this build. This sets the `DHAKE_ARCH` environment variable (available in recipes via `$DHAKE_ARCH` and in buildfiles via `${env:DHAKE_ARCH}`). Targets with an `arch` field that doesn't match are skipped. Default: auto-detected via `uname()`.
+- `--cache[=DIR]` — enable ccache-style build caching: skip recipe execution when a target's inputs and recipe are identical to a previous build. With `--cache`, uses default dir (`$XDG_CACHE_HOME/dhake` or `$HOME/.cache/dhake` or `.dhake-cache`). With `--cache=DIR`, uses `DIR`. Caching is **OPT-IN** and disabled by default. **Only enable for deterministic recipes** (same inputs → same output). The cache key includes the target name, architecture, recipe text, and content hashes of all input dependencies. Pinned output hashes are still verified on cache restore as a safety net.
 - `target` — build named target(s); default is the buildfile's `default`
 
 Exit codes: `0` success; the failing recipe's exit code on a recipe failure
@@ -105,6 +106,9 @@ in  { targets = List { mapKey : Text, mapValue : Target }
 `deps`, `phony` and `recipe` are required. `unveil` on a target and the
  top-level `sandbox` block are optional (see [Sandboxing](#sandboxing-landlock)).
  The `hash`, `depsHash`, `cwd`, and `arch` fields are also optional (see [Verified builds](#verified-builds)).
+
+**Build caching** (via `--cache[=DIR]`) is a global opt-in flag and does not require
+ any new fields in the Target schema; it works with existing targets automatically.
 
 Each target has:
 

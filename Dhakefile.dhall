@@ -141,8 +141,8 @@ let cTarget = \(arch : Text) ->
       let out = if arch == "aarch64" then "dhake.aarch64.elf" else "dhake.com"
       let outHash =
             if arch == "aarch64"
-            then "sha256:77fd4a416b9eb5fbd0c6e6d546a24ae3f049b5ce5ff04fa8afeda1afe5dd99f2"
-            else "sha256:2e8abaaf0093d83d3ff7c1fe8f728a1d5c69e7beae57bb830d8572c2cef55cc0"
+            then "sha256:0171c80c632e18f7d5848c141ba9f961cc272d422f77cb7a7a491b3f523ea204"
+            else "sha256:f41e5a0b9319c9245d16653a7359408ac05bc1761e256251c7c080e8ed34a8fe"
       in  { mapKey = out
           , mapValue =
               { deps = [ "src/dhake.c" ] # core
@@ -153,7 +153,7 @@ let cTarget = \(arch : Text) ->
               -- expected hash of each source dep (verified before build)
               , depsHash =
                   [ { path = "src/dhake.c"
-                    , hash = "sha256:66718ddd2bbba482b19e47bb5fad7d9f7292d90b31427a27182d18402c190e13"
+                    , hash = "sha256:0841363c882a87434b6f8ee754e1110f4156bbecbf17fcfd3a6cda3e70dcbdbe"
                     }
                   ] # coreHashes
               , recipe =

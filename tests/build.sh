@@ -1668,6 +1668,226 @@ ok=1
 check "arch-optional-build-some" "$ok"
 rm -f build_arch_optional.dhall some_arm.out
 
+# ---- Cache tests (C1-C4) ----
+
+# C1: cache-hit-skips-run
+CACHE_DIR="$(mktemp -d /tmp/dhake-cache-test.XXXXXX)"
+rm -rf "$CACHE_DIR"
+mkdir -p "$CACHE_DIR"
+
+# Create input file and simple recipe that copies input to output
+write_file input.txt "hello world"
+
+cat > build_cache.dhall <<'BUILDEOF'
+let Action =
+  < Shell : Text
+  | Copy  : { from : Text, to : Text }
+  | Mkdir : Text
+  | Rm    : Text
+  | Touch : Text
+  >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets =
+        [ { mapKey = "output.txt"
+          , mapValue =
+              { deps = [ "input.txt" ], phony = False
+              , recipe = [ < Shell = "cat input.txt > output.txt && echo ran >> runs.log" > ]
+              }
+          }
+        ]
+    , default = "output.txt"
+    }
+BUILDEOF
+
+# First build: should run the recipe
+rm -f output.txt runs.log
+"$BIN" -f build_cache.dhall --cache="$CACHE_DIR" > /tmp/dhake-cache-c1a.txt 2> /tmp/dhake-cache-c1a-err.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  C1 first build: expected exit 0, got $rc"; ok=0; }
+[ -f output.txt ] || { echo "  C1: output.txt not created"; ok=0; }
+grep -q 'hello world' output.txt || { echo "  C1: output.txt content incorrect"; ok=0; }
+grep -q 'ran' runs.log || { echo "  C1: recipe should have run (first build)"; ok=0; }
+[ "$(grep -c 'ran' runs.log)" -eq 1 ] || { echo "  C1: recipe ran more than once on first build"; ok=0; }
+check "cache-hit-skips-run-first" "$ok"
+
+# Second build with same input: should use cache, recipe should NOT re-run
+rm -f output.txt
+"$BIN" -f build_cache.dhall --cache="$CACHE_DIR" > /tmp/dhake-cache-c1b.txt 2> /tmp/dhake-cache-c1b-err.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  C1 second build: expected exit 0, got $rc"; ok=0; }
+[ -f output.txt ] || { echo "  C1: output.txt not restored from cache"; ok=0; }
+grep -q 'hello world' output.txt || { echo "  C1: output.txt content incorrect (cache)"; ok=0; }
+grep -q "from cache" /tmp/dhake-cache-c1b.txt || { echo "  C1: cache hit message not found"; ok=0; }
+# Recipe should NOT have run again (runs.log should still have only 1 line)
+[ "$(grep -c 'ran' runs.log)" -eq 1 ] || { echo "  C1: recipe re-ran when it should have been cached"; ok=0; }
+check "cache-hit-skips-run" "$ok"
+
+rm -rf "$CACHE_DIR" input.txt output.txt runs.log build_cache.dhall
+
+# C2: cache-key-invalidated-by-input
+CACHE_DIR="$(mktemp -d /tmp/dhake-cache-test.XXXXXX)"
+rm -rf "$CACHE_DIR"
+mkdir -p "$CACHE_DIR"
+
+write_file input.txt "hello world"
+
+cat > build_cache.dhall <<'BUILDEOF'
+let Action =
+  < Shell : Text
+  | Copy  : { from : Text, to : Text }
+  | Mkdir : Text
+  | Rm    : Text
+  | Touch : Text
+  >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets =
+        [ { mapKey = "output.txt"
+          , mapValue =
+              { deps = [ "input.txt" ], phony = False
+              , recipe = [ < Shell = "cat input.txt > output.txt && echo ran >> runs.log" > ]
+              }
+          }
+        ]
+    , default = "output.txt"
+    }
+BUILDEOF
+
+# First build
+rm -f output.txt runs.log
+"$BIN" -f build_cache.dhall --cache="$CACHE_DIR" > /tmp/dhake-cache-c2a.txt 2> /tmp/dhake-cache-c2a-err.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  C2 first build: expected exit 0, got $rc"; ok=0; }
+[ "$(grep -c 'ran' runs.log)" -eq 1 ] || { echo "  C2: recipe ran more than once on first build"; ok=0; }
+check "cache-key-invalidated-by-input-first" "$ok"
+
+# Change input, rebuild: should re-run recipe (cache key changes)
+write_file input.txt "goodbye world"
+rm -f output.txt
+"$BIN" -f build_cache.dhall --cache="$CACHE_DIR" > /tmp/dhake-cache-c2b.txt 2> /tmp/dhake-cache-c2b-err.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  C2 second build: expected exit 0, got $rc"; ok=0; }
+grep -q 'goodbye world' output.txt || { echo "  C2: output.txt content not updated"; ok=0; }
+# Recipe should have run again (runs.log should have 2 lines)
+[ "$(grep -c 'ran' runs.log)" -eq 2 ] || { echo "  C2: recipe should have re-run due to input change"; ok=0; }
+check "cache-key-invalidated-by-input" "$ok"
+
+rm -rf "$CACHE_DIR" input.txt output.txt runs.log build_cache.dhall
+
+# C3: cache-key-invalidated-by-recipe
+CACHE_DIR="$(mktemp -d /tmp/dhake-cache-test.XXXXXX)"
+rm -rf "$CACHE_DIR"
+mkdir -p "$CACHE_DIR"
+
+write_file input.txt "hello world"
+
+cat > build_cache.dhall <<'BUILDEOF'
+let Action =
+  < Shell : Text
+  | Copy  : { from : Text, to : Text }
+  | Mkdir : Text
+  | Rm    : Text
+  | Touch : Text
+  >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets =
+        [ { mapKey = "output.txt"
+          , mapValue =
+              { deps = [ "input.txt" ], phony = False
+              , recipe = [ < Shell = "cat input.txt > output.txt && echo ran >> runs.log" > ]
+              }
+          }
+        ]
+    , default = "output.txt"
+    }
+BUILDEOF
+
+# First build
+rm -f output.txt runs.log
+"$BIN" -f build_cache.dhall --cache="$CACHE_DIR" > /tmp/dhake-cache-c3a.txt 2> /tmp/dhake-cache-c3a-err.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  C3 first build: expected exit 0, got $rc"; ok=0; }
+[ "$(grep -c 'ran' runs.log)" -eq 1 ] || { echo "  C3: recipe ran more than once on first build"; ok=0; }
+check "cache-key-invalidated-by-recipe-first" "$ok"
+
+# Change recipe in buildfile, rebuild: should re-run (cache key changes)
+cat > build_cache.dhall <<'BUILDEOF'
+let Action =
+  < Shell : Text
+  | Copy  : { from : Text, to : Text }
+  | Mkdir : Text
+  | Rm    : Text
+  | Touch : Text
+  >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets =
+        [ { mapKey = "output.txt"
+          , mapValue =
+              { deps = [ "input.txt" ], phony = False
+              , recipe = [ < Shell = "cat input.txt > output.txt && echo ran >> runs.log && echo modified" > ]
+              }
+          }
+        ]
+    , default = "output.txt"
+    }
+BUILDEOF
+
+rm -f output.txt
+"$BIN" -f build_cache.dhall --cache="$CACHE_DIR" > /tmp/dhake-cache-c3b.txt 2> /tmp/dhake-cache-c3b-err.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  C3 second build: expected exit 0, got $rc"; ok=0; }
+# Recipe should have run again (runs.log should have 2 lines)
+[ "$(grep -c 'ran' runs.log)" -eq 2 ] || { echo "  C3: recipe should have re-run due to recipe change"; ok=0; }
+check "cache-key-invalidated-by-recipe" "$ok"
+
+rm -rf "$CACHE_DIR" input.txt output.txt runs.log build_cache.dhall
+
+# C4: cache-dir-explicit
+CACHE_DIR="$(mktemp -d /tmp/dhake-cache-test.XXXXXX)"
+rm -rf "$CACHE_DIR"
+mkdir -p "$CACHE_DIR"
+
+write_file input.txt "hello world"
+
+cat > build_cache.dhall <<'BUILDEOF'
+let Action =
+  < Shell : Text
+  | Copy  : { from : Text, to : Text }
+  | Mkdir : Text
+  | Rm    : Text
+  | Touch : Text
+  >
+let Target = { deps : List Text, phony : Bool, recipe : List Action }
+in  { targets =
+        [ { mapKey = "output.txt"
+          , mapValue =
+              { deps = [ "input.txt" ], phony = False
+              , recipe = [ < Shell = "cat input.txt > output.txt" > ]
+              }
+          }
+        ]
+    , default = "output.txt"
+    }
+BUILDEOF
+
+# Build with explicit cache dir
+rm -f output.txt
+"$BIN" -f build_cache.dhall --cache="$CACHE_DIR" > /tmp/dhake-cache-c4.txt 2> /tmp/dhake-cache-c4-err.txt
+rc=$?
+ok=1
+[ "$rc" -eq 0 ] || { echo "  C4: expected exit 0, got $rc"; ok=0; }
+[ -f output.txt ] || { echo "  C4: output.txt not created"; ok=0; }
+# Check that cache directory has entries (should have at least one file)
+[ "$(ls -A "$CACHE_DIR" | wc -l)" -gt 0 ] || { echo "  C4: cache directory is empty"; ok=0; }
+check "cache-dir-explicit" "$ok"
+
+rm -rf "$CACHE_DIR" input.txt output.txt build_cache.dhall
+
 echo
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

@@ -141,6 +141,32 @@ static int defines_cap = 0;
 static char *arch_param = NULL;
 static const char *arch_value = NULL;
 
+/* --cache[=DIR] support: ccache-style build cache */
+static char *cache_dir = NULL;  /* NULL = disabled */
+
+static void die(const char *fmt, ...);  /* defined below */
+
+/* Return the default cache directory path (heap-allocated). Caller must free. */
+static char *default_cache_dir(void) {
+    const char *xdg_cache = getenv("XDG_CACHE_HOME");
+    const char *home = getenv("HOME");
+    const char *base = NULL;
+    const char *suffix = "";
+    if (xdg_cache && xdg_cache[0]) { base = xdg_cache; suffix = "/dhake"; }
+    else if (home && home[0])      { base = home;     suffix = "/.cache/dhake"; }
+    if (base) {
+        size_t need = strlen(base) + strlen(suffix) + 1;
+        char *p = malloc(need);
+        if (!p) die("default_cache_dir: out of memory");
+        if (snprintf(p, need, "%s%s", base, suffix) >= (int)need) {
+            free(p);
+            die("default_cache_dir: cache directory path too long");
+        }
+        return p;
+    }
+    return strdup(".dhake-cache");
+}
+
 static void apply_defines(void) {
     for (int i = 0; i < ndefines; i++) {
         DefineEntry *d = &defines[i];
@@ -288,6 +314,11 @@ static Hash parse_hash(const char *spec, const char *where) {
 static bool file_sha256_hex(const char *path, char out[65]);
 static long long file_mtime_ns(const char *path, bool *exists);
 
+/* forward declarations used by the build-cache helpers below */
+static bool copy_file(const char *from, const char *to);
+static int mkdir_p(const char *path);
+static int verify_output_hash(Target *t);
+
 /* Compute hash of a file. out must be a 65-byte buffer (64 hex chars + NUL).
  * Returns true on success, false on file error. */
 static bool file_hash(const Hash *h, const char *path, char out[65]) {
@@ -309,6 +340,166 @@ static bool file_sha256_hex(const char *path, char out[65]) {
     sha256_hex(data, len, out);
     free(data);
     return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* Build cache helpers (ccache-style)                                   */
+/* ------------------------------------------------------------------ */
+
+/* Compute the cache key for a target. out must be a 65-byte buffer.
+ * Returns false if any input is unhashable (missing file).
+ * The key incorporates: target name, arch, recipe actions, and content hashes
+ * of all input dependencies. */
+static bool cache_key(Target *t, char out[65]) {
+    /* Growable append buffer for the key material. */
+    size_t buf_cap = 256;
+    size_t buf_len = 0;
+    char *buf = malloc(buf_cap);
+    if (!buf) return false;
+
+    /* Ensure at least `need` more bytes fit; grows geometrically. */
+    #define KEY_ENSURE(need) do { \
+        while (buf_len + (need) + 1 > buf_cap) { \
+            size_t nc = buf_cap * 2; \
+            char *nb = realloc(buf, nc); \
+            if (!nb) { free(buf); return false; } \
+            buf = nb; buf_cap = nc; \
+        } \
+    } while (0)
+
+    /* Append a NUL-terminated string to the key buffer. */
+    #define KEY_APPEND(str) do { \
+        size_t _l = strlen(str); \
+        KEY_ENSURE(_l); \
+        memcpy(buf + buf_len, str, _l); \
+        buf_len += _l; \
+    } while (0)
+
+    /* Append a printf-formatted chunk to the key buffer. */
+    #define KEY_APPENDF(...) do { \
+        int _n = snprintf(NULL, 0, __VA_ARGS__); \
+        if (_n < 0) { free(buf); return false; } \
+        KEY_ENSURE((size_t)_n); \
+        snprintf(buf + buf_len, _n + 1, __VA_ARGS__); \
+        buf_len += (size_t)_n; \
+    } while (0)
+
+    /* Target name + arch */
+    KEY_APPENDF("t:%s\n", t->name);
+    KEY_APPENDF("arch:%s\n", arch_value ? arch_value : "");
+
+    /* Recipe actions */
+    for (Action *a = t->recipe; a; a = a->next) {
+        switch (a->kind) {
+            case ACT_SHELL:
+                KEY_APPENDF("sh:%s\n", a->a ? a->a : "");
+                break;
+            case ACT_RUN:
+                KEY_APPEND("run:");
+                for (int i = 0; i < a->nav; i++) {
+                    if (i > 0) KEY_APPEND(" ");
+                    KEY_APPEND(a->av[i] ? a->av[i] : "");
+                }
+                KEY_APPEND("\n");
+                break;
+            case ACT_COPY:
+                KEY_APPENDF("copy:%s->%s\n", a->a ? a->a : "", a->b ? a->b : "");
+                break;
+            case ACT_MKDIR:
+                KEY_APPENDF("mkdir:%s\n", a->a ? a->a : "");
+                break;
+            case ACT_RM:
+                KEY_APPENDF("rm:%s\n", a->a ? a->a : "");
+                break;
+            case ACT_TOUCH:
+                KEY_APPENDF("touch:%s\n", a->a ? a->a : "");
+                break;
+            case ACT_MOVE:
+                KEY_APPENDF("move:%s->%s\n", a->a ? a->a : "", a->b ? a->b : "");
+                break;
+            case ACT_SYMLINK:
+                KEY_APPENDF("symlink:%s->%s\n", a->a ? a->a : "", a->b ? a->b : "");
+                break;
+            case ACT_CHMOD:
+                KEY_APPENDF("chmod:%s:%s\n", a->a ? a->a : "", a->b ? a->b : "");
+                break;
+            case ACT_ECHO:
+                KEY_APPENDF("echo:%s\n", a->a ? a->a : "");
+                break;
+            case ACT_ENV:
+                KEY_APPENDF("env:%s=%s\n", a->a ? a->a : "", a->b ? a->b : "");
+                break;
+        }
+    }
+
+    /* Input dependency content hashes */
+    for (int j = 0; j < t->ndeps; j++) {
+        const char *path = t->dep_targets[j] ? t->dep_targets[j]->name : t->deps[j];
+        char hex[65];
+        if (!file_sha256_hex(path, hex)) { free(buf); return false; }
+        KEY_APPENDF("d:%s=%s\n", path, hex);
+    }
+
+    sha256_hex(buf, buf_len, out);
+    free(buf);
+    #undef KEY_ENSURE
+    #undef KEY_APPEND
+    #undef KEY_APPENDF
+    return true;
+}
+
+/* Build "<cache_dir>/<key>" on the heap. Returns NULL on alloc failure or
+ * path-too-long (caller treats as cache miss / best-effort store failure). */
+static char *cache_path(const char *key) {
+    size_t need = strlen(cache_dir) + 1 + 64 + 1; /* dir + '/' + sha256 + NUL */
+    char *p = malloc(need);
+    if (!p) return NULL;
+    if (snprintf(p, need, "%s/%s", cache_dir, key) >= (int)need) {
+        free(p);
+        return NULL;
+    }
+    return p;
+}
+
+/* Check if a cache entry exists for the given key. */
+static bool cache_hit(const char *key) {
+    char *p = cache_path(key);
+    if (!p) return false;
+    struct stat st;
+    bool ok = stat(p, &st) == 0 && S_ISREG(st.st_mode);
+    free(p);
+    return ok;
+}
+
+/* Restore a target's output from the cache. Returns true on success. */
+static bool cache_restore(Target *t, const char *key) {
+    char *p = cache_path(key);
+    if (!p) return false;
+    if (!copy_file(p, t->name)) { free(p); return false; }
+    /* Verify output hash if pinned. Unlink a stale entry BEFORE verifying so a
+     * poisoned cache entry does not keep dying on every later same-input build. */
+    if (t->out_hash != NULL && !t->phony) {
+        if (verify_output_hash(t) != 0) {
+            unlink(p);
+            free(p);
+            return false;
+        }
+    }
+    free(p);
+    return true;
+}
+
+/* Store a target's output into the cache. Best-effort (ignores failure). */
+static bool cache_store(Target *t, const char *key) {
+    struct stat st;
+    if (stat(t->name, &st) != 0) return false;
+    if (!S_ISREG(st.st_mode)) return false;
+    char *p = cache_path(key);
+    if (!p) return false;
+    if (mkdir_p(cache_dir) != 0 && errno != EEXIST) { free(p); return false; }
+    bool ok = copy_file(t->name, p);
+    free(p);
+    return ok;
 }
 
 static void print_dhall_error(const DhallError *e) {
@@ -2206,7 +2397,7 @@ static void run_graph(Build *b, const char *format) {
 static void usage(const char *argv0) {
     printf("dhake — a Make-like build tool driven by a Dhall buildfile\n\n");
     printf("Usage:\n");
-    printf("  %s [-f FILE] [-j N] [-n] [-D KEY=VALUE|--define KEY=VALUE] [--arch=NAME] [--list] [--warn-hash-mismatch] [--verify|--check] [--lock[=FILE]] [--hash-uptodate|--content-addressed] [--watch|-w] [--explain|--why] [--graph[=dot|mermaid]] [--quiet|-s] [target ...]\n", argv0);
+    printf("  %s [-f FILE] [-j N] [-n] [-D KEY=VALUE|--define KEY=VALUE] [--arch=NAME] [--cache[=DIR]] [--list] [--warn-hash-mismatch] [--verify|--check] [--lock[=FILE]] [--hash-uptodate|--content-addressed] [--watch|-w] [--explain|--why] [--graph[=dot|mermaid]] [--quiet|-s] [target ...]\n", argv0);
     printf("  %s -h | --help\n\n", argv0);
     printf("Options:\n");
     printf("  -f FILE    buildfile to evaluate (default: ./Dhakefile.dhall, else ./build.dhall)\n");
@@ -2248,6 +2439,13 @@ static void usage(const char *argv0) {
     printf("             set the architecture to NAME for this build; makes DHAKE_ARCH=NAME\n");
     printf("             available in recipes via $DHAKE_ARCH and in buildfiles via\n");
     printf("             ${env:DHAKE_ARCH}. Default: auto-detected via uname()\n");
+    printf("  --cache[=DIR]\n");
+    printf("             enable ccache-style build caching: skip recipe execution when\n");
+    printf("             a target's inputs and recipe are identical to a previous build.\n");
+    printf("             With --cache, uses default dir ($XDG_CACHE_HOME/dhake or\n");
+    printf("             $HOME/.cache/dhake or .dhake-cache). With --cache=DIR, uses DIR.\n");
+    printf("             Caching is OPT-IN and disabled by default. Only enable for\n");
+    printf("             deterministic recipes (same inputs -> same output).\n");
     printf("  target     build the named target(s); default: the buildfile's 'default'\n");
 }
 
@@ -2295,6 +2493,14 @@ int main(int argc, char **argv) {
             const char *v = a + 7;
             if (!*v) die("--arch requires a name (use --arch=NAME)");
             arch_param = strdup(v);
+        }
+        else if (!strcmp(a, "--cache")) {
+            cache_dir = default_cache_dir();
+        }
+        else if (!strncmp(a, "--cache=", 8)) {
+            const char *v = a + 8;
+            if (!*v) die("--cache requires a directory (use --cache=DIR)");
+            cache_dir = strdup(v);
         }
         else if (!strcmp(a, "--graph")) { graph_format = "dot"; }
         else if (!strncmp(a, "--graph=", 8)) {
@@ -2548,6 +2754,31 @@ int main(int argc, char **argv) {
                 continue;
             }
 
+            /* Cache check: if caching is enabled and we have a cache hit, restore and skip */
+            if (cache_dir && !t->phony) {
+                char ck[65];
+                if (cache_key(t, ck) && cache_hit(ck)) {
+                    if (cache_restore(t, ck)) {
+                        t->dirty = false;
+                        if (!quiet) printf("dhake: '%s' from cache\n", t->name);
+                        /* mark done: same decrement-dependents block used by !dirty and dry_run paths */
+                        for (int i2 = 0; i2 < n; i2++) {
+                            Target *dep = order[i2];
+                            if (dep->state != 1) continue;
+                            for (int j = 0; j < dep->ndeps; j++) {
+                                if (dep->dep_targets[j] == t) {
+                                    dep->deps_pending--;
+                                    if (dep->deps_pending == 0) {
+                                        ready[ready_tail++] = dep;
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
+            }
+
             /* Fork a child to run the recipe */
             pid_t pid = fork();
             if (pid == -1) {
@@ -2622,9 +2853,19 @@ int main(int argc, char **argv) {
              * must not schedule them (they cannot build on a broken dep). */
             if (rc == 0) {
                 /* Verify output hash for successful non-phony targets */
+                bool out_ok = true;
                 if (completed->out_hash != NULL && !completed->phony) {
-                    if (verify_output_hash(completed) == 0)
+                    out_ok = (verify_output_hash(completed) == 0);
+                    if (out_ok)
                         printf("dhake: '%s' verified (hash %s)\n", completed->name, completed->out_hash->spec);
+                }
+                /* Store in cache if enabled (skip caching output that failed
+                 * hash verification under --warn-hash-mismatch). */
+                if (out_ok && cache_dir && !completed->phony) {
+                    char ck[65];
+                    if (cache_key(completed, ck)) {
+                        cache_store(completed, ck);
+                    }
                 }
                 for (int i2 = 0; i2 < n; i2++) {
                     Target *dep = order[i2];

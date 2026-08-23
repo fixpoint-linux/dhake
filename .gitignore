@@ -2,6 +2,9 @@
 # binaries, following the dhall-c precedent), so only scratch files are ignored.
 .cache/
 
+# Zig port build artifacts + scratch oracle (gitignored per dhake/zig plan).
+/zig-out/
+
 # Elm docs app — tooling and generated build output (never committed).
 node_modules/
 elm-stuff/

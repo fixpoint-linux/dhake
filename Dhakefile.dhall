@@ -266,6 +266,161 @@ in  { targets =
               , recipe = [ < Shell = "node scripts/ssg.mjs" > ]
               }
           }
+
+        -- ─── Zig self-host targets ─────────────────────────────────────────
+        -- libdhall.so: the dhall-c interpreter core compiled by Zig as a shared
+        -- library, consumed by the Zig dhake through the C-ABI seam
+        -- (zig/src/dhall_abi.zig). The recipe uses `zig build-obj` + `cc -shared`
+        -- + `strip` (NOT `zig build-lib`): build-lib output is non-deterministic
+        -- (pointer-keyed anon symbols in .symtab) and would emit SONAME libabi.so,
+        -- so its hash could never be pinned. This deterministic chain emits a
+        -- standard ELF with the correct SONAME and byte-identical output, so the
+        -- output hash is pinned. The ZIG_*_CACHE_DIR vars are set inline because
+        -- dhake's recipe env does not inherit the build host's cache dirs.
+        , { mapKey = "vendor/dhall-c/zig/lib/libdhall.so"
+          , mapValue =
+              { deps =
+                  [ "vendor/dhall-c/zig/src/abi.zig"
+                  , "vendor/dhall-c/zig/src/dhall.zig"
+                  , "vendor/dhall-c/zig/src/arena.zig"
+                  , "vendor/dhall-c/zig/src/ast.zig"
+                  , "vendor/dhall-c/zig/src/parser.zig"
+                  , "vendor/dhall-c/zig/src/normalize.zig"
+                  , "vendor/dhall-c/zig/src/import.zig"
+                  , "vendor/dhall-c/zig/src/sha256.zig"
+                  , "vendor/dhall-c/zig/src/bignum.zig"
+                  , "vendor/dhall-c/zig/src/lexer.zig"
+                  , "vendor/dhall-c/zig/src/builtins.zig"
+                  , "vendor/dhall-c/zig/src/http.zig"
+                  , "vendor/dhall-c/zig/src/ssrf.zig"
+                  ]
+              , phony = False
+              -- expected hash of the produced libdhall.so (verified after build)
+              , hash = "sha256:0f40fc2e36afd42f25d7f0e792a160f47117191e7e40e9295401a65ac014bc2d"
+              , depsHash =
+                  [ { path = "vendor/dhall-c/zig/src/abi.zig"
+                    , hash = "sha256:b469394990918f57b4dd7b06e1d18fa6f4c8e0c97b1bbd7e4dd3fb7ceacf105f"
+                    }
+                  , { path = "vendor/dhall-c/zig/src/dhall.zig"
+                    , hash = "sha256:4dea854433832ad1080e0495268947acb22167048d7ddf8cea0ac1e61e900e29"
+                    }
+                  , { path = "vendor/dhall-c/zig/src/arena.zig"
+                    , hash = "sha256:e34f53d9663581fa5be2138b2a71584dfcf4f17a76cccf6d77db0b7910a955eb"
+                    }
+                  , { path = "vendor/dhall-c/zig/src/ast.zig"
+                    , hash = "sha256:b414df16e39a81e409cabf5843c12c9ed56eb4ecda70167955c177f06d7d6574"
+                    }
+                  , { path = "vendor/dhall-c/zig/src/parser.zig"
+                    , hash = "sha256:e1f988face58db0961ab058bb4619d22a8c2fe567f666240ab719b85d10fd906"
+                    }
+                  , { path = "vendor/dhall-c/zig/src/normalize.zig"
+                    , hash = "sha256:463d49ef6d3dbe9dde5700625616baf31bde9fa57950928f7a4f37c502de3d99"
+                    }
+                  , { path = "vendor/dhall-c/zig/src/import.zig"
+                    , hash = "sha256:851f53d9409bf6ab950d614015b825e843406a1de89d80b8f9f1167d04afd1b3"
+                    }
+                  , { path = "vendor/dhall-c/zig/src/sha256.zig"
+                    , hash = "sha256:f8606ab9bdb60f9cbf6f1f4763d140b79aa2afa352caf3d4409e9bdc11dba15b"
+                    }
+                  , { path = "vendor/dhall-c/zig/src/bignum.zig"
+                    , hash = "sha256:5890fa076125f4dd9a642fa99c694653c0fde51215bb21f4d7bcebe610f6ae86"
+                    }
+                  , { path = "vendor/dhall-c/zig/src/lexer.zig"
+                    , hash = "sha256:6d87085f98f36cbb1e91ad408ce8865bc27f78d8ea23a637817bafefa196b3fd"
+                    }
+                  , { path = "vendor/dhall-c/zig/src/builtins.zig"
+                    , hash = "sha256:b99627cfa9a273ec1deedb1c19bde54d403182592ac90a9597d6deff19a554d7"
+                    }
+                  , { path = "vendor/dhall-c/zig/src/http.zig"
+                    , hash = "sha256:6a2df3d94ccc723888a2ef5efe3b8d6fe6b620087e3de52bdddb93e8dcad71fb"
+                    }
+                  , { path = "vendor/dhall-c/zig/src/ssrf.zig"
+                    , hash = "sha256:a8dbc2c3427d12b4a2860fa36afb145a468ac15ea66b447cfb4d9741a166e4d6"
+                    }
+                  ]
+              , recipe =
+                  [ < Shell =
+                        "cd vendor/dhall-c/zig/src && rm -f ../lib/libdhall.so && "
+                     ++ "ZIG_GLOBAL_CACHE_DIR=/tmp/.zcache ZIG_LOCAL_CACHE_DIR=/tmp/.zlcache "
+                     ++ "zig build-obj abi.zig -lc -dynamic -O ReleaseSafe -fno-stack-check "
+                     ++ "-femit-bin=/tmp/dhake-libdhall.o && "
+                     ++ "cc -shared -o ../lib/libdhall.so /tmp/dhake-libdhall.o -lc "
+                     ++ "-Wl,-soname,libdhall.so -Wl,--build-id=none && "
+                     ++ "strip --strip-all ../lib/libdhall.so"
+                    >
+                  ]
+              }
+          }
+        , { mapKey = "zig-out/dhake"
+          , mapValue =
+              { deps =
+                  [ "zig/src/dhall_abi.zig"
+                  , "zig/src/dhall_types.zig"
+                  , "zig/src/eval.zig"
+                  , "zig/src/exec.zig"
+                  , "zig/src/graph.zig"
+                  , "zig/src/hash.zig"
+                  , "zig/src/main.zig"
+                  , "zig/src/opts.zig"
+                  , "zig/src/plan.zig"
+                  , "zig/src/report.zig"
+                  , "zig/src/sandbox.zig"
+                  , "zig/src/sysio.zig"
+                  , "zig/src/watch.zig"
+                  , "zig/build.sh"
+                    -- libdhall.so is a target dep, verified via its own output hash
+                  , "vendor/dhall-c/zig/lib/libdhall.so"
+                  ]
+              , phony = False
+              -- expected hash of the produced zig-out/dhake (verified after build)
+              , hash = "sha256:ba8257a47e9a238a0fa9503362e5fee9a4f1879b4e9423a8d9132e8cf31e43f7"
+              , depsHash =
+                  [ { path = "zig/src/dhall_abi.zig"
+                    , hash = "sha256:8d1e70b2c6896bcaa36da83f0e22bc50e3b0eb511d6064dba7e3af6e9b4880ef"
+                    }
+                  , { path = "zig/src/dhall_types.zig"
+                    , hash = "sha256:4dea854433832ad1080e0495268947acb22167048d7ddf8cea0ac1e61e900e29"
+                    }
+                  , { path = "zig/src/eval.zig"
+                    , hash = "sha256:e9304e6e33f632d9d3c453cbf4993270b69c4c7e779ea5d0a9b80fd1d4d14212"
+                    }
+                  , { path = "zig/src/exec.zig"
+                    , hash = "sha256:8a38a546ef88ed44b399810b6bffd95e4d223b8c753d4430a7b1d49424568a19"
+                    }
+                  , { path = "zig/src/graph.zig"
+                    , hash = "sha256:482e289d6252ffb7c2f3a7b0e593499199ff78f7cdbc8544c9ef3bbf6263a3a7"
+                    }
+                  , { path = "zig/src/hash.zig"
+                    , hash = "sha256:9d6c126b3aa3cfbfd099f86a14446810275ec302f94f8ad4a25d0107853baa01"
+                    }
+                  , { path = "zig/src/main.zig"
+                    , hash = "sha256:6420c3641eb5a5a815652948f8ef635c29f8897fe712223a8884d2fbab299108"
+                    }
+                  , { path = "zig/src/opts.zig"
+                    , hash = "sha256:e4488d5fb5bfc9f181d9ee2794755a3d4ba5c9934d2ed812a837da938dca2a7f"
+                    }
+                  , { path = "zig/src/plan.zig"
+                    , hash = "sha256:4c534811958d65be5f6f7c5320d8e863560d0b4eb1a28f459f99520926059946"
+                    }
+                  , { path = "zig/src/report.zig"
+                    , hash = "sha256:8364790f050d9572015623cc506491a9a0b931752b3f9efb7d42bdabfa3b70ac"
+                    }
+                  , { path = "zig/src/sandbox.zig"
+                    , hash = "sha256:ec7a949c73708c2c66482766d743792c8ebc892612cfa3be7b58944127948333"
+                    }
+                  , { path = "zig/src/sysio.zig"
+                    , hash = "sha256:5c8eeb272f13c5e13d09d6c043ea73f803805dc292a04229cd2514be151a9a24"
+                    }
+                  , { path = "zig/src/watch.zig"
+                    , hash = "sha256:7dc97167346ee1ad0dc58ebd78668a239618061d051b2714d1ed620f237188ab"
+                    }
+                  , { path = "zig/build.sh"
+                    , hash = "sha256:72000f1ad1b7b8d26ad68ced228fcf4108b038fdf149db7be09073120b5fd634"
+                    }
+                  ]
+              , recipe = [ < Shell = "bash zig/build.sh" > ]
+              }
+          }
         ]
       , default = "dhake.com"
       }

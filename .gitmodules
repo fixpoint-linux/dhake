@@ -1,6 +1,6 @@
 [submodule "vendor/dhall-c"]
 	path = vendor/dhall-c
-	url = https://github.com/jmars/dhall-c
+	url = https://github.com/fixpoint-linux/dhall-c.git
 [submodule "design"]
 	path = design
 	url = https://github.com/fixpoint-linux/design.git

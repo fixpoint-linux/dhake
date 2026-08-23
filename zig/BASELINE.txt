@@ -1,0 +1,126 @@
+PASS end-to-end-build
+PASS incremental-skip
+PASS staleness-rebuild
+PASS phony-clean
+PASS phony-always-runs
+PASS failing-recipe-exit7
+PASS cycle-detection
+PASS dry-run-leaves-files
+PASS list-targets
+PASS missing-source-file
+PASS parallel-build-j2
+PASS parallel-stop-on-first-failure
+PASS action-move
+PASS action-symlink
+PASS action-chmod
+PASS action-echo
+PASS action-env
+PASS action-run
+PASS mkdir-recursive
+PASS rm-recursive
+PASS rm-recursive-missing
+PASS mkdir-legacy-text
+PASS rm-legacy-nonrecursive
+PASS sandbox-write-inside
+PASS sandbox-deny-write-outside
+PASS sandbox-unveil-allow
+PASS sandbox-unveil-deny-other
+PASS shell-redirect-scoped-stdout
+PASS output-hash-correct
+PASS output-hash-correct-up-to-date
+PASS output-hash-wrong
+PASS dep-hash-correct
+PASS dep-hash-tampered
+PASS output-tampered-build
+PASS output-tampered-up-to-date
+PASS unsupported-algorithm
+PASS bare-hex-rejected
+PASS warn-hash-mismatch-output
+PASS warn-hash-mismatch-output-still-fatal
+PASS warn-hash-mismatch-dep
+PASS readExec-deny-read-etc
+  expected success OR 'landlock sandbox unavailable' warning (rc=3)
+FAIL readExec-allow-cc-build
+  expected /dev/null read success OR 'landlock sandbox unavailable' warning (rc=3)
+FAIL readExec-devnull-readable
+PASS no-readExec-backward-compat
+PASS readExec-fail-closed
+PASS denyNetwork-denies-AF_INET
+  AF_UNIX socket unexpectedly denied
+FAIL denyNetwork-allows-AF_UNIX
+  AF_INET should be allowed with denyNetwork=False
+FAIL no-denyNetwork-backward-compat
+PASS denyNetwork-fail-closed
+PASS lockfile-verified-target
+PASS lockfile-transitive-deps-chain
+PASS lockfile-dry-run-no-write
+PASS verify-clean-up-to-date
+PASS verify-needs-rebuild
+PASS verify-dep-hash-mismatch
+touch: setting times of 'verify_v4.txt': Operation not permitted
+PASS verify-output-hash-mismatch
+PASS verify-no-recipe-run
+touch: setting times of 'src_h1.txt': Operation not permitted
+PASS hash-uptodate-touch-no-rebuild
+  'building' not found without --hash-uptodate (should rebuild)
+dhake: 'hash_h1.txt' is up to date
+FAIL hash-uptodate-mtime-still-works
+PASS hash-uptodate-content-change-rebuild
+  'watching' line not found in log after 10s
+dhake: building 'watch_out.txt'
+cat watch_src.txt > watch_out.txt
+dhake: --watch requires Linux inotify: Operation not permitted
+dhake: building 'watch_out.txt'
+  rebuild not detected (building count < 2 and/or watch_out.txt != v2)
+  building count: 2
+  watch_out.txt: v1
+dhake: building 'watch_out.txt'
+cat watch_src.txt > watch_out.txt
+dhake: --watch requires Linux inotify: Operation not permitted
+dhake: building 'watch_out.txt'
+FAIL watch-rebuild-on-change
+PASS explain-missing-output
+PASS explain-clean-up-to-date
+touch: setting times of 'explain_e3_src.c': Operation not permitted
+  explain expected non-zero exit, got 0
+  'needs rebuild' not found in explain output
+dhake: 'explain_e3' is up to date
+  'newer' or 'hash' reason not found in explain output
+dhake: 'explain_e3' is up to date
+FAIL explain-source-newer
+PASS explain-phony-target
+PASS quiet-build
+PASS quiet-error-stderr
+PASS quiet-alias
+PASS define-injects-env-import
+PASS define-required
+PASS define-not-leaked-to-recipe
+PASS graph-dot-format
+PASS graph-mermaid-format
+PASS cwd-basic
+  expected exit 0, got 1
+  'verified' not found in output
+FAIL cwd-hash
+PASS cwd-chdir-fail
+PASS arch-env
+  expected exit 0, got 1
+FAIL arch-filter-skip-x86
+  expected exit 0, got 1
+FAIL arch-filter-skip-aarch64
+PASS arch-dhall-env
+  expected exit 0, got 1
+FAIL arch-field-bare-match
+PASS arch-field-bare-skip
+  expected exit 0, got 1
+FAIL arch-optional-skip-some
+  expected exit 0, got 1
+FAIL arch-optional-build-some
+PASS cache-hit-skips-run-first
+PASS cache-hit-skips-run
+PASS cache-key-invalidated-by-input-first
+PASS cache-key-invalidated-by-input
+PASS cache-key-invalidated-by-recipe-first
+PASS cache-key-invalidated-by-recipe
+PASS cache-dir-explicit
+
+=== 78 passed, 13 failed ===

@@ -1,0 +1,3 @@
+let Action = < Shell : Text >
+let Target = { deps : List Text, phony : Bool, recipe : List Action, arch : Text }
+in  { targets = [ { mapKey = "x86-target", mapValue = { deps = [] : List Text, phony = False, recipe = [ < Shell = "touch x86_target.out" > ], arch = "x86_64" } } ], default = "x86-target" }

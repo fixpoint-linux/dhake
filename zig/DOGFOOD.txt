@@ -1,0 +1,82 @@
+DOGFOOD — ZIG dhake builds a real Zig program green (Stage-2 ethos win)
+=======================================================================
+
+Context
+-------
+The migration's value proposition (MIGRATION.md Stage 2) is a fully self-hosted
+dhake built by the Zig toolchain. This file records concrete evidence that the
+ZIG dhake (zig-out/dhake, built by `zig build-exe`) drives a real toolchain
+(zig itself) through a normal build.dhall recipe and produces a working artifact.
+
+Scratch layout: zig-out/dogfood/
+  build.dhall  — targets = [ { mapKey = "hello",
+                              mapValue = { deps = ["hello.zig"], phony = False,
+                                           recipe = [ < Shell = "ZIG_GLOBAL_CACHE_DIR=/tmp/.zcache ZIG_LOCAL_CACHE_DIR=/tmp/.zlcache zig build-exe hello.zig -lc -femit-bin=hello" > ] } } ]
+                 default = "hello"
+  hello.zig    — Zig 0.16 program printing "hello from dogfood zig dhake"
+
+Recipe (verbatim from the plan's dogfood spec):
+  ZIG_GLOBAL_CACHE_DIR=/tmp/.zcache ZIG_LOCAL_CACHE_DIR=/tmp/.zlcache \
+    zig build-exe hello.zig -lc -femit-bin=hello
+
+Result (ZIG dhake binary, not the C oracle)
+-------------------------------------------
+[1] `zig-out/dhake -f build.dhall`  ->  build rc = 0
+    "dhake: building 'hello'"
+    echoes the zig build-exe action and runs it successfully.
+[2] produced artifact type:  "hello: ELF 64-bit LSB executable, x86-64,
+    dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2"
+[3] `./hello`  ->  prints "hello from dogfood zig dhake", rc = 0   (works)
+[4] second `zig-out/dhake -f build.dhall`  ->  "dhake: 'hello' is up to date", rc = 0
+    (incremental up-to-dateness detection works on the produced artifact)
+
+Interpretation
+--------------
+- The ZIG dhake evaluates a Dhall buildfile, computes dirtiness, forks a child
+  that runs the `zig build-exe` recipe, and returns success (rc=0) with a valid,
+  runnable ELF produced. This is the same toolchain the ZIG dhake itself is
+  built with — i.e. dhake-on-Zig drives Zig end to end.
+- Failure propagation is also exercised: with an intentionally broken hello.zig
+  (std.io, removed in Zig 0.16) the recipe failed and dhake correctly returned
+  rc=1 (not swallowed).
+- NOTE: the zig build-exe recipe is slow on a cold cache (minutes under this
+  sandbox); an impatient foreground timeout that kills the subprocess mid-write
+  leaves a partial non-ELF file. Let it run to completion and the artifact is a
+  valid executable. This is a sandbox timing artifact, not a dhake defect.
+
+
+U7 — SELF-HOST: the Zig dhake is now a first-class Dhakefile target
+===================================================================
+The Dhakefile gained two Zig self-host targets, so dhake (via its own buildfile)
+builds the Zig toolchain's shared core and the Zig dhake binary:
+
+  libdhall.so  -> vendor/dhall-c/zig/lib/libdhall.so
+                  (Zig-compiled dhall-c core; the C-ABI seam dhake links -ldhall)
+  zig-out/dhake -> the Zig dhake binary itself (links libdhall.so in-process)
+
+Recipe for libdhall.so uses `zig build-obj` + `cc -shared` + `strip --strip-all`
+(NOT `zig build-lib`, whose output is non-deterministic — pointer-keyed anon
+symbols — and would emit SONAME libabi.so). Both targets are pinned with learned
+out_hashes + per-file depsHash pins, so they are byte-verifiable.
+
+Result (driver = dhake.com.dbg, the C bootstrap — the all-Zig path is the recipes):
+[1] `./dhake.com.dbg -f Dhakefile.dhall zig-out/dhake`  ->  rc = 0
+      "dhake: 'vendor/dhall-c/zig/lib/libdhall.so' is up to date"
+      "dhake: building 'zig-out/dhake'"  ->  `bash zig/build.sh`
+      "dhake: 'zig-out/dhake' verified (hash sha256:ba8257a4...)  (pin matches)"
+[2] forced libdhall.so rebuild (deleted the .so): recipe ran, produced
+      vendor/dhall-c/zig/lib/libdhall.so, hash sha256:0f40fc2e... == pinned pin,
+      SONAME = [libdhall.so], rc = 0; re-run "is up to date" rc = 0.
+[3] `zig-out/dhake --abi-smoke` on the Dhakefile-built binary  ->  SMOKE OK, rc = 0
+      (proves the binary is the real dhake linked against libdhall.so).
+[4] `./dhake.com.dbg -f Dhakefile.dhall zig-out/dhake` (2nd)  ->  "is up to date", rc = 0
+
+Interpretation
+--------------
+- dhake now self-hosts its own Zig build: the Dhakefile expresses a libdhall.so
+  target (Zig-compiled core) + a zig-out/dhake target (Zig build-exe via
+  zig/build.sh), both pinned and verified byte-for-byte. No cosmocc needed for
+  the Zig track — all-Zig toolchain, matching the Stage-2 ethos.
+- `zig-out/dhake -f Dhakefile.dhall --list` lists libdhall.so + zig-out/dhake and
+  evaluates clean; the C bootstrap (dhake.com) still builds via unchanged
+  coreHashes pins (both targets coexist in the same buildfile).

@@ -6,12 +6,14 @@ embedded C Dhall interpreter, maps the normalized value onto a build plan, and
 executes it — dependency ordering, incremental (mtime) up-to-date checks, phony
 targets, and typed actions.
 
-It compiles with [cosmocc](https://github.com/jart/cosmopolitan) into a single
-portable [Actually Portable Executable](https://justine.lol/ape.html) (APE) that
-runs on Linux, macOS, Windows, and BSDs from one file.
-
-`dhake` is **self-hosting**: the committed `dhake.com` is the bootstrap binary,
-and the `Dhakefile.dhall` at the repo root builds `dhake.com` from source.
+The committed `dhake.com` is a single portable
+[Actually Portable Executable](https://justine.lol/ape.html) (APE) that runs on
+Linux, macOS, Windows, and BSDs from one file. The tool itself is implemented
+in Zig (see `zig/`), linking the Zig-compiled Dhall core (`libdhall.so` from
+the vendored dhall-c submodule) in-process. The former C bootstrap
+(`src/dhake.c`, compiled with cosmocc) has been removed, so `dhake.com` ships
+as a committed binary that is no longer rebuilt from source — CI and consumers
+run it directly.
 
 ## Why
 
@@ -25,25 +27,31 @@ With `--watch`, dhake becomes a dev-loop tool: it watches your source-file
 dependencies and automatically rebuilds on any change, turning edit-save-refresh
 into a seamless workflow.
 
-## Build (self-hosting)
+## Build
 
-No build system required to build dhake — dhake builds itself:
+Building dhake from source uses the Zig toolchain:
 
 ```sh
-./dhake.com.dbg          # evaluates Dhakefile.dhall, builds dhake.com
-./dhake.com.dbg --list   # list targets
+bash zig/build.sh         # -> zig-out/dhake
+zig-out/dhake --list      # list targets
 ```
 
-The resulting `dhake.com` is itself a dhake executable, so you can drop it on
-any system and it rebuilds the next copy from source.
+Or let dhake drive its own build: the `Dhakefile.dhall` default target is
+`zig-out/dhake` (plus the `libdhall.so` core it links), so any dhake binary —
+e.g. the committed `./dhake.com` — builds it:
 
-Requirements: `cosmocc` on `$PATH` (the committed `dhake.com` is the bootstrap;
-rebuilding from source needs the toolchain).
+```sh
+./dhake.com               # evaluates Dhakefile.dhall, builds zig-out/dhake
+./dhake.com clean         # remove the build output (zig-out/)
+```
+
+Requirements: `zig` and `cc` on `$PATH` (`zig/build.sh` compiles `zig/src/`
+and links against `vendor/dhall-c/zig/lib/libdhall.so`).
 
 ## Test
 
 ```sh
-./tests/build.sh ./dhake.com.dbg     # 22 end-to-end cases
+bash tests/build.sh zig-out/dhake    # 91 end-to-end cases vs zig/BASELINE.txt
 ```
 
 ## Usage
@@ -448,18 +456,19 @@ reports clear errors.
 ## Layout
 
 ```
-Dhakefile.dhall        self-hosting buildfile (builds dhake.com)
-src/dhake.c            the tool (single file, links dhall-c core)
-tests/build.sh         18 end-to-end cases
-vendor/dhall-c         dhall-c interpreter (git submodule @ 07a069c)
-docs/                  GitHub Pages site
-.github/workflows/     Pages deploy workflow
-dhake.com              committed bootstrap APE (self-host)
+Dhakefile.dhall        buildfile (default target: zig-out/dhake)
+zig/                   the tool: Zig sources (zig/src), build.sh, test corpus
+tests/build.sh         end-to-end cases (functional gate vs zig/BASELINE.txt)
+vendor/dhall-c         dhall-c interpreter (git submodule @ 07a069c); zig/ builds libdhall.so
+dist/                  docs site (Elm app; Dhakefile targets build dist/index.html)
+.github/workflows/     site deploy workflow
+dhake.com              committed prebuilt APE (CI + consumers; not built from source)
 ```
 
-The `docs/` site is plain committed HTML; `.github/workflows/pages.yml`
-deploys it to GitHub Pages on every push to `master`. Enable once in the repo:
-**Settings → Pages → Source → "GitHub Actions"**.
+The `dist/` site is an Elm app (`src/Main.elm`) pre-rendered by
+`scripts/ssg.mjs`; `.github/workflows/deploy.yml` builds it with the committed
+dhake (`./dhake.com dist/index.html`) and deploys it to
+dhake.fixpointlinux.org on every push to `master`.
 
 ## License
 

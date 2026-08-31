@@ -172,7 +172,7 @@ in  { targets =
               , hash = "sha256:0f40fc2e36afd42f25d7f0e792a160f47117191e7e40e9295401a65ac014bc2d"
               , depsHash =
                   [ { path = "vendor/dhall-c/zig/src/abi.zig"
-                    , hash = "sha256:b469394990918f57b4dd7b06e1d18fa6f4c8e0c97b1bbd7e4dd3fb7ceacf105f"
+                    , hash = "sha256:8e1861f6984e4fed51c3cce3bfd63d6b97e172573bd5d26616f84b6400262ce4"
                     }
                   , { path = "vendor/dhall-c/zig/src/dhall.zig"
                     , hash = "sha256:4dea854433832ad1080e0495268947acb22167048d7ddf8cea0ac1e61e900e29"
@@ -181,13 +181,13 @@ in  { targets =
                     , hash = "sha256:e34f53d9663581fa5be2138b2a71584dfcf4f17a76cccf6d77db0b7910a955eb"
                     }
                   , { path = "vendor/dhall-c/zig/src/ast.zig"
-                    , hash = "sha256:b414df16e39a81e409cabf5843c12c9ed56eb4ecda70167955c177f06d7d6574"
+                    , hash = "sha256:ab58cd8785b12e98305772473127bd263d1ec3f16d257be4c75f274851c4dce1"
                     }
                   , { path = "vendor/dhall-c/zig/src/parser.zig"
-                    , hash = "sha256:e1f988face58db0961ab058bb4619d22a8c2fe567f666240ab719b85d10fd906"
+                    , hash = "sha256:b7da590a01e73e260296481ebf6ad2f62c36c6bcbd260e57fca7b524787ee753"
                     }
                   , { path = "vendor/dhall-c/zig/src/normalize.zig"
-                    , hash = "sha256:463d49ef6d3dbe9dde5700625616baf31bde9fa57950928f7a4f37c502de3d99"
+                    , hash = "sha256:eb3f1dd9c6976cf15ee49a2774440172ddd0fbd21e5c51ea58f99bed07f13108"
                     }
                   , { path = "vendor/dhall-c/zig/src/import.zig"
                     , hash = "sha256:851f53d9409bf6ab950d614015b825e843406a1de89d80b8f9f1167d04afd1b3"
@@ -199,7 +199,7 @@ in  { targets =
                     , hash = "sha256:5890fa076125f4dd9a642fa99c694653c0fde51215bb21f4d7bcebe610f6ae86"
                     }
                   , { path = "vendor/dhall-c/zig/src/lexer.zig"
-                    , hash = "sha256:6d87085f98f36cbb1e91ad408ce8865bc27f78d8ea23a637817bafefa196b3fd"
+                    , hash = "sha256:4a7cdc9dd981baf5f4dab8c2462701d91179f746d407eecaaadfe0d7dc31d4f9"
                     }
                   , { path = "vendor/dhall-c/zig/src/builtins.zig"
                     , hash = "sha256:b99627cfa9a273ec1deedb1c19bde54d403182592ac90a9597d6deff19a554d7"

@@ -54,7 +54,14 @@ const PathBeneathAttr = extern struct {
     parent_fd: i32,
 };
 comptime {
-    std.debug.assert(@sizeOf(PathBeneathAttr) == 16);
+    // The kernel's landlock_path_beneath_attr is `__attribute__((packed))`
+    // (u64 + s32 = 12 bytes); only parent_fd's offset and the first 12 bytes
+    // are ever read, so the LP64 padding is harmless. u64 is 4-byte aligned
+    // on i386, so the same extern struct is 12 bytes there and 16 on LP64 —
+    // pin the layout this target actually produces (offset first: it is the
+    // one the kernel depends on).
+    std.debug.assert(@offsetOf(PathBeneathAttr, "parent_fd") == 8);
+    std.debug.assert(@sizeOf(PathBeneathAttr) == if (@sizeOf(usize) == 8) 16 else 12);
 }
 
 // ─── seccomp BPF filter types (linux/filter.h) ───────────────────────────
@@ -223,7 +230,9 @@ fn landlockPermsRights(perms: []const u8, abi: c_int, read_exec: bool) u64 {
 fn landlockAllow(rfd: c_int, path: []const u8, rights: u64) void {
     const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .PATH = true, .CLOEXEC = true }, 0) catch return;
     var a = PathBeneathAttr{ .allowed_access = rights, .parent_fd = fd };
-    const rc = std.os.linux.syscall4(.landlock_add_rule, @as(u64, @intCast(rfd)), LANDLOCK_RULE_PATH_BENEATH, @intFromPtr(&a), 0);
+    // syscallN's arg width is target-dependent (u64 on x86_64, u32 on i386):
+    // let @intCast infer it rather than pinning u64.
+    const rc = std.os.linux.syscall4(.landlock_add_rule, @intCast(rfd), LANDLOCK_RULE_PATH_BENEATH, @intFromPtr(&a), 0);
     if (std.os.linux.errno(rc) != .SUCCESS) {
         sysio.writeErrFmt("dhake: warning: landlock_add_rule('{s}'): {s}\n", .{
             path,
@@ -384,7 +393,7 @@ pub fn sandboxChild(b: *plan.Build, t: ?*plan.Target) void {
         }
     }
 
-    const rs = std.os.linux.syscall2(.landlock_restrict_self, @as(u64, @intCast(rfd)), 0);
+    const rs = std.os.linux.syscall2(.landlock_restrict_self, @intCast(rfd), 0);
     if (std.os.linux.errno(rs) != .SUCCESS) {
         sandboxFail(b, std.mem.span(strerror(@intFromEnum(std.os.linux.errno(rs)))));
         _ = std.os.linux.close(rfd);

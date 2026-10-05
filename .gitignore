@@ -5,6 +5,12 @@
 # Zig port build artifacts + scratch oracle (gitignored per dhake/zig plan).
 /zig-out/
 
+# Zig build cache (build.zig now lives at this repo root, so EVERY build drops
+# .zig-cache/ here — the same artifact every sibling ignores: fx-core
+# .gitignore:1, fxstore:6, fx-init:33).  Without this, `git add -A` (or
+# `git commit -a`) sweeps the whole cache into the commit.
+.zig-cache/
+
 # Elm docs app — tooling and generated build output (never committed).
 node_modules/
 elm-stuff/

@@ -205,7 +205,12 @@ in  { targets =
                     , hash = "sha256:b99627cfa9a273ec1deedb1c19bde54d403182592ac90a9597d6deff19a554d7"
                     }
                   , { path = "vendor/dhall-c/zig/src/http.zig"
-                    , hash = "sha256:6a2df3d94ccc723888a2ef5efe3b8d6fe6b620087e3de52bdddb93e8dcad71fb"
+                    -- Re-pinned with the dhall-c submodule bump
+                    -- 15c0b805 -> 565d728 ("http: compare chunk sizes in u64 so
+                    -- 32-bit targets cannot narrow them"): MEASURED
+                    -- sha256sum of the file at the pinned submodule commit
+                    -- (was 6a2df3d9...).
+                    , hash = "sha256:1335b6d9431a7df75c4f43a36f53d88ee82e01e39d2e8425842af4eb56e54872"
                     }
                   , { path = "vendor/dhall-c/zig/src/ssrf.zig"
                     , hash = "sha256:a8dbc2c3427d12b4a2860fa36afb145a468ac15ea66b447cfb4d9741a166e4d6"
@@ -279,7 +284,10 @@ in  { targets =
                     , hash = "sha256:8364790f050d9572015623cc506491a9a0b931752b3f9efb7d42bdabfa3b70ac"
                     }
                   , { path = "zig/src/sandbox.zig"
-                    , hash = "sha256:ec7a949c73708c2c66482766d743792c8ebc892612cfa3be7b58944127948333"
+                    -- Re-pinned for the uncommitted 32-bit work in this file
+                    -- (the PathBeneathAttr guard + the width-neutral
+                    -- @intCast(fd) change): MEASURED sha256sum, was ec7a949c...
+                    , hash = "sha256:cce07d7ac71f1514b1557a6610c472336a3d4a8993c6f9a15eeff3a3989eea53"
                     }
                   , { path = "zig/src/sysio.zig"
                     , hash = "sha256:5c8eeb272f13c5e13d09d6c043ea73f803805dc292a04229cd2514be151a9a24"
